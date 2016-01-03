@@ -1,0 +1,5 @@
+.*.sw?
+.rebar/
+aptest
+deps/
+ebin/
