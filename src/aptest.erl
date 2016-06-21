@@ -1,132 +1,148 @@
 -module(aptest).
 -export([main/1]).
--import(aptest_util, [msg/2]).
+-import(aptest_util, [msg/2, err_msg/2, to_s/1]).
 
--include("apns_recs.hrl").
+-define(RC_SUCCESS, 0).
+-define(RC_ERROR, 1).
+-define(RC_FATAL, 2).
+
+-type return_code() :: integer().
+-type terminate_arg() :: 'help' |
+                         {error, string()} |
+                         {exception, Class :: atom(), Reason :: term()} |
+                         {return_code(), string()} |
+                         return_code().
 
 %%--------------------------------------------------------------------
-main([Token, Msg, APNSCert, APNSKey]) ->
-    main([Token, Msg, APNSCert, APNSKey, "prod"]);
-main([Token, Msg, APNSCert, APNSKey, PD]) when PD == "prod"; PD == "dev" ->
-    RC = run([Token, Msg, APNSCert, APNSKey, PD]),
-    halt(RC);
-main(_) ->
-    usage().
+%% main([Token, Msg, APNSCert, APNSKey]) ->
+%%     main([Token, Msg, APNSCert, APNSKey, "prod"]);
+%% main([Token, Msg, APNSCert, APNSKey, PD]) when PD == "prod"; PD == "dev" ->
+%%     RC = run([Token, Msg, APNSCert, APNSKey, PD]),
+%%     halt(RC);
+%% main(_) ->
+%%     usage().
+
+-spec main(Args) -> no_return() when Args :: [string()].
+main(Args) ->
+    PgmName = filename:basename(escript:script_name()),
+    halt(terminate(PgmName, do_main(Args))).
 
 %%--------------------------------------------------------------------
-run([Token, Msg, APNSCert, APNSKey, PD]) ->
+-spec do_main(Args) -> Result when
+      Args :: [string()], Result :: terminate_arg().
+do_main(Args) ->
+    try aptest_cmdline:parse_args(Args) of
+        {ok, {action_help, _Config}} ->
+            help;
+        {error, _Errmsg} = Err ->
+            Err;
+        {ok, {Action, Config}} ->
+            try_run(Action, Config)
+    catch
+        Class:Reason ->
+            err_msg("Class: ~p, Reason: ~p~n", [Class, Reason]),
+            {exception, Class, Reason}
+    end.
+
+%%--------------------------------------------------------------------
+-spec try_run(Action, Config) -> Result when
+      Action :: aptest_cmdline:action(),
+      Config :: aptest_cmdline:config(),
+      Result :: terminate_arg().
+try_run(Action, Config) ->
+    run(Action, Config).
+
+%%--------------------------------------------------------------------
+-spec run(Action, Config) -> Result when
+      Action :: aptest_cmdline:action(),
+      Config :: aptest_cmdline:config(),
+      Result :: terminate_arg().
+run(action_default, Config) ->
+    run(action_send, Config);
+run(action_send, Config) ->
+    send(Config);
+run(Action, Config) ->
+    msg("Action: ~p~nConfig:~n~p~n", [Action, Config]),
+    {error, "Unhandled action: " ++ to_s(Action)}.
+
+%%--------------------------------------------------------------------
+-spec terminate(ScriptName, Arg) -> integer() when
+      ScriptName :: string(),
+      Arg :: terminate_arg().
+terminate(ScriptName, help) ->
+    usage(ScriptName),
+    terminate(ScriptName, ?RC_ERROR);
+terminate(ScriptName, {error, Errmsg}) ->
+    usage(ScriptName),
+    err_msg("***** ~s~n~n", [Errmsg]),
+    terminate(ScriptName, ?RC_ERROR);
+terminate(ScriptName, {exception, Class, Reason}) ->
+    err_msg("***** ~p:~n~p~n", [Class, Reason]),
+    err_msg("~p~n~n", [erlang:get_stacktrace()]),
+    terminate(ScriptName, ?RC_FATAL);
+terminate(ScriptName, {RC, Errmsg}) when is_integer(RC) ->
+    err_msg("***** ~s~n~n", [Errmsg]),
+    terminate(ScriptName, RC);
+terminate(_ScriptName, RC) when is_integer(RC) ->
+    RC.
+
+-spec usage(PgmName) -> ok when PgmName :: string().
+usage(PgmName) ->
+    aptest_cmdline:usage(PgmName),
+    ok.
+
+%%--------------------------------------------------------------------
+send(Config) ->
+    {_, AptestCfg} = aptest_util:req_prop(aptest, Config),
+    {_, SSLCfg} = aptest_util:req_prop(ssl_opts, Config),
+
     application:ensure_all_started(ssl),
-    BToken = sc_util:hex_to_bitstring(Token),
-    Notification = [{alert, list_to_binary(Msg)}, {sound, <<"wopr">>}],
-    JSON = apns_json:make_notification(Notification),
-    SSLOpts = [
-               {certfile, APNSCert},
-               {keyfile, APNSKey},
-               {versions, ['tlsv1']} % Fix for SSL issue http://erlang.org/pipermail/erlang-questions/2015-June/084935.html
-              ],
-    case send(BToken, JSON, SSLOpts, list_to_atom(PD)) of
+
+    APNSVersion = sc_util:req_val(apns_version, AptestCfg),
+    Mod = list_to_atom("aptest_apnsv" ++ integer_to_list(APNSVersion)),
+
+    JSON = case sc_util:req_val(raw_json, AptestCfg) of
+               [] ->
+                    Message = sc_util:req_val(message, AptestCfg),
+                    Badge = sc_util:req_val(badge, AptestCfg),
+                    Sound = sc_util:req_val(sound, AptestCfg),
+                    Notification = make_notification(Message, Badge, Sound),
+                    apns_json:make_notification(Notification);
+               RawJSON ->
+                   RawJSON
+           end,
+
+    APNSCert = sc_util:req_val(apns_cert, SSLCfg),
+    APNSKey = sc_util:req_val(apns_key, SSLCfg),
+    SSLOpts = Mod:make_ssl_opts(APNSCert, APNSKey),
+    Opts = [{ssl_opts, SSLOpts}],
+
+    Token = sc_util:req_val(apns_token, AptestCfg),
+    APNSEnv = sc_util:req_val(apns_env, AptestCfg),
+
+    case Mod:send(Token, JSON, Opts, APNSEnv) of
         ok ->
             msg("Pushed without receiving APNS error!~n", []),
             0;
-        {error, #apns_error{} = AE} ->
-            msg("APNS error: ~s~n", [format_apns_error(AE)]),
+        {error, AE} ->
+            msg("APNS error: ~s~n", [Mod:format_apns_error(AE)]),
             1;
         Error ->
             msg("Error: ~p~n", [Error]),
             2
     end.
 
-%%--------------------------------------------------------------------
-send(BToken, JSON, SSLOpts, Prod) when Prod =:= prod; Prod =:= dev ->
-    {Host, Port} = host_info(Prod),
-    msg("Connecting over TLS to ~s:~B~n", [Host, Port]),
-    {ok, Sock} = ssl:connect(Host, Port, SSLOpts),
-    msg("Connected.~n", []),
-    try
-        Packet = apns_lib:encode_v2(1, 16#FFFFFFFF, BToken, JSON, 10),
-        check_packet(Packet),
-        msg("Sending packet:~n", []),
-        aptest_util:hexdump(Packet),
-        case ssl:send(Sock, Packet) of
-            ok ->
-                msg("Waiting for error response.~n", []),
-                wait_for_resp(1000);
-            Error ->
-                msg("APNS didn't like that packet! SSL said: ~p~n", [Error]),
-                Error
-        end
-    after
-        ssl:close(Sock)
-    end.
+make_notification(Message, Badge, Sound) ->
+    [{alert, list_to_binary(Message)}] ++
+    maybe_badge(Badge) ++
+    maybe_sound(Sound).
 
-%%--------------------------------------------------------------------
-wait_for_resp(Timeout) ->
-    wait_for_resp(Timeout, ok).
+maybe_badge(N) when is_integer(N), N < 0 ->
+    [];
+maybe_badge(N) when is_integer(N) ->
+    [{badge, N}].
 
-wait_for_resp(Timeout, Status) ->
-    receive
-        {ssl, _Socket, Data} ->
-            NewStatus = handle_response(Data),
-            wait_for_resp(Timeout, NewStatus);
-        {ssl_closed, _Socket} ->
-            msg("SSL socket closed~n", []),
-            wait_for_resp(Timeout, Status);
-        Other ->
-            msg("Ignored message queue data: ~p~n", [Other]),
-            wait_for_resp(Timeout, Status)
-    after
-        Timeout ->
-            Status
-    end.
-
-%%--------------------------------------------------------------------
-handle_response(Data) ->
-    case apns_lib:decode_error_packet(Data) of
-        #apns_error{} = Err ->
-            {error, Err};
-        _Error ->
-            {error, {unrecognized, Data}}
-    end.
-
-%%--------------------------------------------------------------------
-format_apns_error(#apns_error{id = Id,
-                              status = S,
-                              status_code = SC,
-                              status_desc = SD}) ->
-    io_lib:format("id: ~B status: ~p status_code: ~B status_desc: ~s~n",
-                  [Id, S, SC, SD]).
-
-%%--------------------------------------------------------------------
-usage() ->
-    msg("usage: ~s token message path/to/apns/cert.pem path/to/apns/key.pem [prod|dev]~n~n",
-        [escript:script_name()]),
-    halt(1).
-
-%%--------------------------------------------------------------------
-check_packet(Packet) ->
-    case apns_lib:decode(Packet) of
-        #apns_notification{cmd      = Cmd,
-                           id       = Id,
-                           expire   = Expire,
-                           token    = Token,
-                           payload  = Payload,
-                           priority = Priority,
-                           rest     = Rest} ->
-            msg("Packet decode check:~n~n"
-                "Command version: ~p~n"
-                "Notification ID: ~B~n"
-                "Expiry         : ~B~n"
-                "Token          : ~s~n"
-                "Payload        : ~s~n"
-                "Priority       : ~B~n"
-                "Rest           : ~p~n~n",
-                [Cmd, Id, Expire, sc_util:bitstring_to_hex(Token),
-                 Payload, Priority, Rest]);
-        Error ->
-            msg("Error doing packet decode check: ~p~n", [Error])
-    end.
-
-%%--------------------------------------------------------------------
-host_info(prod) -> {"gateway.push.apple.com", 2195};
-host_info(dev) -> {"gateway.sandbox.push.apple.com", 2195}.
-
+maybe_sound("") ->
+    [];
+maybe_sound(Sound) ->
+    [{sound, sc_util:to_b(Sound)}].
