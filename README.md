@@ -1,29 +1,16 @@
 # Summary
 
-This is a simple, very rudimentary APNS push token tester. The error messages are ugly and the command line is simplistic. Maybe sometime there will be time to make it pretty.
+This is a simple APNS push token tester. It supports APNS v2 ("enhanced" binary API) and v3 (`HTTP/2`).
 
-You will require the push certificate and the unencrypted push key in PEM format, as well as your push token in hex format. You also need outbound access on port 2195 to Apple's 17.0.0.0 IPv4 address range.
+You will require the push certificate and the unencrypted push key in PEM format, as well as a valid push token.
+You also need outbound access on port 443 (for `HTTP/2`) or 2195 to Apple's 17.0.0.0 IPv4 address range.
 
 # Building
 
-This has only been built and tested on Debian Jessie, using Erlang R17. It is not guaranteed to build or work on other platforms, although it probably will if Erlang R17 is installed.
-
-This requires the installation of `rebar` >= 2.6.0, `Erlang R17`, and GNU `make`.
-
-# Obtaining and building rebar
-
-`rebar` can be built from github as follows (requires Erlang to be installed):
-
-```
-git clone https://github.com/rebar/rebar
-cd rebar
-git checkout 2.6.0
-make
-```
-
-Make sure the `rebar` executable is somewhere on the `PATH`, like `/usr/local/bin`.
-
-# Building aptest
+* Building requires Erlang 18 and `rebar3`.
+* `rebar3` is automatically downloaded if not present.
+* It has only been built and tested on Debian Jessie.
+* It is not guaranteed to build or work on other platforms, although it probably will if Erlang 18 is installed.
 
 ```
 git clone https://github.com/SilentCircle/apns_push_test
@@ -31,81 +18,107 @@ cd apns_push_test
 make
 ```
 
+# Usage
+
+    Usage: aptest [--send] [-c <apns_cert>] [-e [<apns_env>]] [-k <apns_key>]
+                  [-p [<apns_port>]] [-t <apns_token>] [-v [<apns_version>]]
+                  [-b [<badge>]] [-h] [-m <message>] [-r [<raw_json>]]
+                  [-s [<sound>]] [-V [<verbose>]]
+
+      --send              Send notification
+      -c, --apns-cert     APNS certificate file
+      -e, --apns-env      APNS environment (prod|dev) [default: prod]
+      -k, --apns-key      APNS private key file
+      -p, --apns-port     APNS port [default: 2197]
+      -t, --apns-token    APNS hexadecimal token
+      -v, --apns-version  APNS protocol version [default: 2]
+      -b, --badge         APNS badge count [-1: unchanged] [default: -1]
+      -h, --help          Show help
+      -m, --message       APNS alert text
+      -r, --raw-json      Raw APNS JSON notification [default: ]
+      -s, --sound         APNS sound file name                [default: ]
+      -V, --verbose       Verbose output [default: false]
+
+---
+
 # Running
 
-```
-aptest token message path/to/apns/cert.pem path/to/apns/key.pem [prod|dev]
-```
+## APNS v2
 
-Defaults to `prod`.
+    ./aptest -t 843f************************************************4860aafb7362 \
+             -c com.example.cert.pem \
+             -k com.example.key.pem \
+             -m 'Testing 123' \
+             --apns-version=2 \
+             --badge=123
+    [2016-06-23T22:36:13.253554Z] Connecting over TLS to gateway.push.apple.com:2195
+    [2016-06-23T22:36:14.240639Z] Connected.
+    [2016-06-23T22:36:14.263168Z] Packet decode check:
 
-# Success output
+    Command version: v2
+    Notification ID: 1
+    Expiry         : 4294967295
+    Token          : 843f************************************************4860aafb7362
+    Payload        : {"aps":{"alert":"Testing 123","content-available":1,"badge":123}}
+    Priority       : 10
+    Rest           : <<>>
 
-Mainly, you will see the push message on your device.
+    [2016-06-23T22:36:14.274531Z] Sending APNS v2 packet:
+    00000000: 02 00 00 00 79 01 00 20 84 3f ** ** ** ** ** **   ....y.. .?...&..
+    00000010: ** ** ** ** ** ** ** ** ** ** ** ** ** ** ** **   ..X../a.....m..3
+    00000020: ** ** 48 60 aa fb 73 62 02 00 41 7b 22 61 70 73   (.H`..sb..A{"aps
+    00000030: 22 3a 7b 22 61 6c 65 72 74 22 3a 22 54 65 73 74   ":{"alert":"Test
+    00000040: 69 6e 67 20 31 32 33 22 2c 22 63 6f 6e 74 65 6e   ing 123","conten
+    00000050: 74 2d 61 76 61 69 6c 61 62 6c 65 22 3a 31 2c 22   t-available":1,"
+    00000060: 62 61 64 67 65 22 3a 31 32 33 7d 7d 03 00 04 00   badge":123}}....
+    00000070: 00 00 01 04 00 04 ff ff ff ff 05 00 01 0a         ..............
+    [2016-06-23T22:36:14.274947Z] Waiting for error response.
+    [2016-06-23T22:36:15.390155Z] Pushed without receiving APNS error!
 
-```
-$ aptest 8f72e8890000000000000000000000000000000000000000819bd64324bacc6c 'Sent to XXX from aptest' com.example.Example.cert.pem com.example.Example.key.pem
-[2015-03-16T21:45:30.734697Z] Connecting over TLS to gateway.push.apple.com:2195
-[2015-03-16T21:45:31.691279Z] Connected.
-[2015-03-16T21:45:31.694936Z] Packet decode check:
 
-Command version: v2
-Notification ID: 1
-Expiry         : 4294967295
-Token          : 8f72e8890000000000000000000000000000000000000000819bd64324bacc6c
-Payload        : {"aps":{"alert":"Sent to XXX from aptest","sound":"wopr"}}
-Priority       : 10
-Rest           : <<>>
+---
 
-[2015-03-16T21:45:31.700619Z] Sending packet:
-00000000: 02 00 00 00 72 01 00 20 8f 72 e8 89 00 00 00 00   ....r.. .r......
-00000010: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00   ................
-00000020: 81 9b d6 43 24 ba cc 6c 02 00 3a 7b 22 61 70 73   ...C$..l..:{"aps
-00000030: 22 3a 7b 22 61 6c 65 72 74 22 3a 22 53 65 6e 74   ":{"alert":"Sent
-00000040: 20 74 6f 20 58 58 58 20 66 72 6f 6d 20 61 70 74    to XXX from apt
-00000050: 65 73 74 22 2c 22 73 6f 75 6e 64 22 3a 22 77 6f   est","sound":"wo
-00000060: 70 72 22 7d 7d 03 00 04 00 00 00 01 04 00 04 ff   pr"}}...........
-00000070: ff ff ff 05 00 01 0a                              .......
-[2015-03-16T21:45:31.701055Z] Waiting for error response.
-[2015-03-16T21:45:32.871234Z] Pushed without receiving APNS error!
-```
+## APNS v3
 
-# Error output
+    ./aptest -t 843f************************************************4860aafb7362 \
+             -c com.example.cert.pem \
+             -k com.example.key.pem \
+             -m 'Testing 123' \
+             --apns-version=3 \
+             --badge=123
+    [2016-06-23T22:35:28.113332Z] Connecting with HTTP/2 to api.push.apple.com:443
+    [2016-06-23T22:35:28.864767Z] Connected.
+    [2016-06-23T22:35:28.864951Z] Sending synchronous request:
+    Headers: [{<<":method">>,<<"POST">>},
+              {<<":path">>,
+               <<"/3/device/843f************************************************4860aafb7362">>},
+              {<<":scheme">>,<<"https">>},
+              {<<"apns-id">>,<<"19499bf9-e634-4ba1-bb41-67ab708dedd0">>},
+              {<<"apns-topic">>,<<"com.example.AppId">>}]
+    Body: <<"{\"aps\":{\"alert\":\"Testing 123\",\"content-available\":1,\"badge\":123}}">>
+    [2016-06-23T22:35:29.027213Z] Response time: 146075 microseconds
+    Response headers: [{<<":status">>,<<"200">>},
+                       {<<"apns-id">>,<<"19499bf9-e634-4ba1-bb41-67ab708dedd0">>}]
+    Response body: undefined
+    [2016-06-23T22:35:29.027484Z] Pushed without receiving APNS error!
 
-This varies widely. Giving the wrong path to a certificate, for example, will result in ugly Erlangish abuse being heaped on you. Giving a bad token obtains more polite output.
+---
 
-```
-# Bad token
-$ aptest 0000000000000000000000000000000000000000000000000000000000000000 'Sent to XXX from aptest' com.example.Example.cert.pem com.example.Example.key.unencrypted.pem
-[2015-03-16T21:54:23.299539Z] Connecting over TLS to gateway.push.apple.com:2195
-[2015-03-16T21:54:23.701062Z] Connected.
-[2015-03-16T21:54:23.704643Z] Packet decode check:
+# Issues
 
-Command version: v2
-Notification ID: 1
-Expiry         : 4294967295
-Token          : 0000000000000000000000000000000000000000000000000000000000000000
-Payload        : {"aps":{"alert":"Sent to XXX from aptest","sound":"wopr"}}
-Priority       : 10
-Rest           : <<>>
-
-[2015-03-16T21:54:23.709625Z] Sending packet:
-00000000: 02 00 00 00 72 01 00 20 00 00 00 00 00 00 00 00   ....r.. ........
-00000010: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00   ................
-00000020: 00 00 00 00 00 00 00 00 02 00 3a 7b 22 61 70 73   ..........:{"aps
-00000030: 22 3a 7b 22 61 6c 65 72 74 22 3a 22 53 65 6e 74   ":{"alert":"Sent
-00000040: 20 74 6f 20 58 58 58 20 66 72 6f 6d 20 61 70 74    to XXX from apt
-00000050: 65 73 74 22 2c 22 73 6f 75 6e 64 22 3a 22 77 6f   est","sound":"wo
-00000060: 70 72 22 7d 7d 03 00 04 00 00 00 01 04 00 04 ff   pr"}}...........
-00000070: ff ff ff 05 00 01 0a                              .......
-[2015-03-16T21:54:23.709834Z] Waiting for error response.
-[2015-03-16T21:54:23.751801Z] SSL socket closed
-[2015-03-16T21:54:24.752115Z] APNS error: id: 1 status: invalid_token status_code: 8 status_desc: Invalid token
-```
-
+* The `--apns-port` option is currently ignored. Ports are chosen based on which APNS version is being used (v2: 2195; v3: 443).
+* It has not been tested with `--raw-json`.
+* It needs to be run through dialyzer.
 
 # Other information
 
+## APNS version 2
+
 * Apple Production push FQDN used: `gateway.push.apple.com:2195`
 * Apple Development push FQDN used: `gateway.sandbox.push.apple.com:2195`
+
+## APNS Version 3
+
+* Apple Production push FQDN used: `api.push.apple.com:443`
+* Apple Development push FQDN used: `api.development.push.apple.com:443`
 
