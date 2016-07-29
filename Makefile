@@ -26,9 +26,12 @@ clean: $(REBAR3)
 distclean: clean
 	@rm -rf deps ebin .rebar _build
 
+dialyzer: $(REBAR3)
+	$(REBAR3) do clean, dialyzer
+
 install: compile
 	install -d $(DESTDIR)/usr/local/bin
-	install -m755 $< $(DESTDIR)/usr/local/bin
+	install -m755 _build/default/bin/aptest $(DESTDIR)/usr/local/bin
 
 $(REBAR3):
 	curl -s -Lo rebar3 $(REBAR3_URL) || wget $(REBAR3_URL)

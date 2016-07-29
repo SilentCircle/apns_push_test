@@ -1,6 +1,7 @@
 -module(aptest_apnsv3).
 -export([
          send/4,
+         send_file/2,
          format_apns_error/1,
          make_ssl_opts/2
         ]).
@@ -18,33 +19,105 @@
     }).
 
 %%%-------------------------------------------------------------------
+%%% Types
+%%%-------------------------------------------------------------------
+-type json() :: binary().
+-type token() :: binary().
+-type apns_env() :: prod | dev.
+-type tokens() :: [token()].
+-type cert_filename() :: string().
+-type key_filename() :: string().
+-type http2_header() :: {binary(), binary()}.
+-type http2_headers() :: [http2_header()].
+-type http2_body() :: [binary()].
+-type http2_resp() :: {http2_headers(), http2_body()}.
+-type send_error() :: {error, http2_resp()}.
+-type send_result() :: ok | send_error().
+-type apns_cert_files() :: {cert_filename(), key_filename()}.
+-type send_mult_result() :: {ok, token()}
+                          | {error, {http2_resp(), token()}}.
+-type send_mult_results() :: [send_mult_result()].
+-type send_file_result() :: {apns_cert_files(), send_mult_results()}.
+
+%%%-------------------------------------------------------------------
 %%% API
 %%%-------------------------------------------------------------------
 
 %%--------------------------------------------------------------------
+start_client(Host, Port, SSLOpts) ->
+    h2_client:start_link(https, Host, Port, SSLOpts).
+
+%%--------------------------------------------------------------------
+stop_client(Pid) ->
+    ok = h2_client:stop(Pid).
+
+%%--------------------------------------------------------------------
 -spec send(Token, JSON, Opts, Env) -> Result
-    when Token :: string(), JSON :: string() | binary(), Opts :: list(),
-         Env :: prod | dev,
-         Result :: ok | {error, term()}.
+    when Token :: token(), JSON :: json(), Opts :: list(),
+         Env :: apns_env(), Result :: send_result().
 send(Token, JSON, Opts, Env) when Env =:= prod; Env =:= dev ->
     SSLOpts = sc_util:req_val(ssl_opts, Opts),
-    CertFile = sc_util:req_val(certfile, SSLOpts),
-    AppBundleID = hd(get_bundle_ids(CertFile)),
+    CertFileName = sc_util:req_val(certfile, SSLOpts),
+    AppBundleID = hd(get_bundle_ids(CertFileName)),
+    {APNSHost, APNSPort} = host_info(Env),
+    msg("Connecting with HTTP/2 to ~s:~B~n", [APNSHost, APNSPort]),
+    {ok, Pid} = start_client(APNSHost, APNSPort, SSLOpts),
+    msg("Connected.~n", []),
+    Response = send_impl(Pid, Token, AppBundleID, JSON),
+    _ = stop_client(Pid),
+    Response.
+
+%%--------------------------------------------------------------------
+-spec send_file(Filename, JSON) -> Results
+    when Filename :: string(), JSON :: json(),
+         Results :: [send_file_result()].
+send_file(Filename, JSON) ->
+    {ok, B} = file:read_file(Filename),
+    Conns = parse_conninfo(B),
+    [{{Cert, Key}, send_mult(Cert, Key, JSON, Tokens)}
+     || {{Cert, Key}, Tokens} <- validate_conninfo(Conns)].
+
+%%--------------------------------------------------------------------
+-spec send_mult(APNSCert, APNSKey, JSON, Tokens) -> Results
+    when APNSCert :: cert_filename(), APNSKey :: key_filename(),
+         JSON :: json(), Tokens :: tokens(),
+         Results :: send_mult_results().
+send_mult(APNSCert, APNSKey, JSON, Tokens) ->
+    {APNSHost, APNSPort} = host_info(prod), % For now
+    Topic = get_topic(APNSCert),
+    SSLOpts = make_ssl_opts(APNSCert, APNSKey),
+    Wrap = fun(ok, Tok) ->
+                   {ok, Tok};
+              ({error, Err}, Tok) ->
+                   {error, {Err, Tok}}
+           end,
+
+    msg("Connecting with HTTP/2 to ~s:~B~n", [APNSHost, APNSPort]),
+    {ok, Pid} = start_client(APNSHost, APNSPort, SSLOpts),
+    msg("Connected.~n", []),
+    Results = try
+                  [Wrap(send_impl(Pid, Tok, Topic, JSON), Tok)
+                   || Tok <- Tokens]
+              after
+                  _ = stop_client(Pid),
+                  msg("Disconnected.~n", [])
+              end,
+    Results.
+
+%%--------------------------------------------------------------------
+-spec send_impl(Pid, Token, Topic, JSON) -> Result
+    when Pid :: pid(), Token :: token(), Topic :: binary(),
+         JSON :: json(), Result :: send_result().
+send_impl(Pid, Token, Topic, JSON) ->
     HTTPPath = to_b("/3/device/" ++ Token),
     ReqUUID = to_b(uuid:uuid_to_string(uuid:get_v4())),
     ReqHdrs = [{<<":method">>, <<"POST">>},
                {<<":path">>, HTTPPath},
                {<<":scheme">>, <<"https">>},
                {<<"apns-id">>, ReqUUID},
-               {<<"apns-topic">>, to_b(AppBundleID)}
+               {<<"apns-topic">>, to_b(Topic)}
               ],
 
-    {APNSHost, APNSPort} = host_info(Env),
-    msg("Connecting with HTTP/2 to ~s:~B~n", [APNSHost, APNSPort]),
-
-    {ok, Pid} = h2_client:start_link(https, APNSHost, APNSPort, SSLOpts),
-
-    msg("Connected.~n", []),
     ReqBody = to_b(JSON),
     msg("Sending synchronous request:~nHeaders: ~p~nBody: ~p~n",
         [ReqHdrs, ReqBody]),
@@ -63,33 +136,101 @@ send(Token, JSON, Opts, Env) when Env =:= prod; Env =:= dev ->
 
     _ = maybe_warn_uuid(ReqUUID, RespUUID),
 
-    Response = case sc_util:req_val(<<":status">>, RespHdrs) of
-                   <<"200">> ->
-                       ok;
-                   _Error ->
-                       {error, {RespHdrs, RespBody}}
-               end,
-    ok = h2_client:stop(Pid),
-    Response.
+    case sc_util:req_val(<<":status">>, RespHdrs) of
+        <<"200">> ->
+            ok;
+        _Error ->
+            {error, {RespHdrs, RespBody}}
+    end.
 
 %%--------------------------------------------------------------------
 format_apns_error({RespHdrs, RespBody}) ->
     Id = sc_util:req_val(<<"apns-id">>, RespHdrs),
     S = sc_util:req_val(<<":status">>, RespHdrs),
     SD = status_desc(S),
-    {RD, TS} = parse_resp_body(RespBody),
-    TD = timestamp_desc(TS),
+    {Fmt, Args} = parsed_resp_body_fmt(Id, S, SD, parse_resp_body(RespBody)),
+    io_lib:format(Fmt, Args).
 
-    io_lib:format("id: ~s~n"
-                  "~s"
-                  "status: ~s~n"
-                  "status_desc: ~s~n"
-                  "reason_desc: ~s",
-                  [Id, TD, S, SD, RD]).
+%%--------------------------------------------------------------------
+parsed_resp_body_fmt(Id, S, SD, []) ->
+    {"id:             ~s~n"
+     "status:         ~s~n"
+     "status_desc:    ~s~n",
+     [Id, S, SD]};
+parsed_resp_body_fmt(Id, S, SD, [{Rsn, EJSON}]) ->
+    {"id:             ~s~n"
+     "status:         ~s~n"
+     "status_desc:    ~s~n"
+     "reason:         ~s~n"
+     "reason_desc:    ~s~n"
+     "ejson:          ~p~n",
+     [Id, S, SD, Rsn, reason_desc(Rsn), EJSON]};
+parsed_resp_body_fmt(Id, S, SD, [{Rsn, TS, EJSON}]) ->
+    {"id:             ~s~n"
+     "status:         ~s~n"
+     "status_desc:    ~s~n"
+     "reason:         ~s~n"
+     "reason_desc:    ~s~n"
+     "timestamp:      ~B~n"
+     "timestamp_desc: ~s~n"
+     "ejson:          ~p~n",
+     [Id, S, SD, Rsn, reason_desc(Rsn), TS, timestamp_desc(TS), EJSON]}.
 
 %%%-------------------------------------------------------------------
 %%% Internal Functions
 %%%-------------------------------------------------------------------
+
+%% @doc
+%% ConnData must be newline-separated records.
+%% Each record has two space-delimited fields (one space only).
+%%
+%% Field 1: APNS cert file (.pem) path
+%% Field 2: APNS key file (unencrypted .pem) path
+%% Field 3: Token
+%%
+%% Returns [{{CertFile, KeyFile}, [Token]}].
+%% where CertFile :: binary(), KeyFile :: binary(),
+%%       Token :: binary().
+%% @end
+-spec parse_conninfo(ConnData) -> ConnInfo
+    when ConnData :: binary(),
+         ConnInfo :: [{{cert_filename(), key_filename()}, tokens()}].
+parse_conninfo(<<ConnData/binary>>) ->
+    Fields = [binary:split(L, [<<" ">>, <<"\t">>], [global, trim_all])
+              || L <- binary:split(ConnData, <<"\n">>, [global])],
+    %% Collect all the tokens that have the same AppBundleID
+    D = lists:foldl(fun([CF, KF, Token], Dict) ->
+                            dict:append({sc_util:to_list(CF),
+                                         sc_util:to_list(KF)}, Token, Dict);
+                       (X, Dict) ->
+                            io:format(standard_error,
+                                      "Ignoring data: ~p\n", [X]),
+                            Dict
+                    end, dict:new(), Fields),
+    dict:to_list(D).
+
+%%--------------------------------------------------------------------
+-spec validate_conninfo(CIs) -> ValidCIs
+    when CIs :: [{{cert_filename(), key_filename()}, tokens()}],
+         ValidCIs :: [{{cert_filename(), key_filename()}, tokens()}].
+validate_conninfo(CIs) ->
+    [ConnInfo || ConnInfo <- CIs, is_valid_conn(ConnInfo)].
+
+%%--------------------------------------------------------------------
+is_valid_conn({{CertFile, KeyFile}, _Tok}) ->
+    lists:all(fun(Filename) -> check_file(Filename) end,
+              [CertFile, KeyFile]).
+
+%%--------------------------------------------------------------------
+check_file(Filename) ->
+    case file:open(Filename, [read]) of
+        {ok, FH} ->
+            ok = file:close(FH),
+            true;
+        {error, _} ->
+            msg("Cannot open file ~s\n", [Filename]),
+            false
+    end.
 
 %%--------------------------------------------------------------------
 maybe_warn_uuid(UUID, UUID) ->
@@ -99,17 +240,30 @@ maybe_warn_uuid(ReqUUID, RespUUID) ->
         "Req: ~s~nRsp: ~s~n", [ReqUUID, RespUUID]).
 
 %%--------------------------------------------------------------------
--spec parse_resp_body(RespBody) -> {RespDesc, Timestamp}
-    when RespBody :: [binary()], RespDesc :: binary(),
-         Timestamp :: undefined | binary().
+-spec parse_resp_body(RespBody) -> []
+                                   | [{Reason, EJSON}]
+                                   | [{Reason, Timestamp, EJSON}]
+    when RespBody :: [binary()], Reason :: binary(),
+         Timestamp :: undefined | non_neg_integer(),
+         EJSON :: term().
 parse_resp_body([]) ->
-    {<<"<undefined>">>, <<"">>};
+    [];
 parse_resp_body([<<RespBody/bytes>>]) ->
     EJSON = jsx:decode(RespBody),
     Reason = sc_util:req_val(<<"reason">>, EJSON),
-    Timestamp = sc_util:val(<<"timestamp">>, EJSON),
-    {reason_desc(Reason), Timestamp}.
+    case sc_util:val(<<"timestamp">>, EJSON) of
+        undefined ->
+            [{Reason, EJSON}];
+        TS when is_integer(TS)  ->
+            [{Reason, TS, EJSON}]
+    end.
 
+
+%%--------------------------------------------------------------------
+-spec get_topic(CertFile) -> Topic
+    when CertFile :: string(), Topic :: binary().
+get_topic(CertFile) ->
+    hd(get_bundle_ids(CertFile)).
 
 %%--------------------------------------------------------------------
 -spec get_bundle_ids(CertFile) -> Result
@@ -127,9 +281,9 @@ bundle_id(#cert_info{bundle_id=BundleID}) ->
 
 %%--------------------------------------------------------------------
 timestamp_desc(undefined) ->
-    <<"">>;
-timestamp_desc(<<TS/binary>>) ->
-    list_to_binary([<<"timestamp: ">>, TS, $\n]).
+    undefined;
+timestamp_desc(TS) when is_integer(TS), TS >= 0 ->
+    list_to_binary(posix_ms_to_iso8601(TS)).
 
 %%--------------------------------------------------------------------
 status_desc(<<"200">>) ->
@@ -216,6 +370,7 @@ reason_desc(<<Other/bytes>>) ->
     Other.
 
 %%--------------------------------------------------------------------
+-spec make_ssl_opts(string(), string()) -> [{atom(), term()}].
 make_ssl_opts(APNSCert, APNSKey) ->
     [{certfile, APNSCert},
      {keyfile, APNSKey},
@@ -226,3 +381,15 @@ make_ssl_opts(APNSCert, APNSKey) ->
 %%--------------------------------------------------------------------
 host_info(prod) -> {"api.push.apple.com", 443};
 host_info(dev) -> {"api.development.push.apple.com", 443}.
+
+posix_ms_to_iso8601(TS) ->
+    now_to_iso8601(posix_ms_to_timestamp(TS)).
+
+-compile({inline, [{posix_ms_to_timestamp, 1}]}).
+posix_ms_to_timestamp(TS) when is_integer(TS), TS >= 0 ->
+    {TS div 1000000000, TS rem 1000000000 div 1000, TS rem 1000 * 1000}.
+
+now_to_iso8601(Now) ->
+    {{Y,Mo,D},{H,M,S}} = calendar:now_to_universal_time(Now),
+    io_lib:format("~B-~2..0B-~2..0BT~2..0B:~2..0B:~2..0BZ",
+                  [Y, Mo, D, H, M, S]).

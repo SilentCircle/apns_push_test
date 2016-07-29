@@ -25,14 +25,16 @@
 option_spec_list() ->
     [
      {action_send,     undefined, "send",            undefined,               "Send notification"                  },
-     {apns_cert,       $c,        "apns-cert",       string,                  "APNS certificate file"              },
+     {action_sendfile, undefined, "sendfile",        undefined,               "Send notifications from file"       },
+     {apns_cert,       $c,        "apns-cert",       {string, ""},            "APNS certificate file"              },
      {apns_env,        $e,        "apns-env",        {atom, prod},            "APNS environment (prod|dev)"        },
-     {apns_key,        $k,        "apns-key",        string,                  "APNS private key file"              },
+     {apns_key,        $k,        "apns-key",        {string, ""},            "APNS private key file"              },
      {apns_port,       $p,        "apns-port",       {integer, 2197},         "APNS port"                          },
-     {apns_token,      $t,        "apns-token",      string,                  "APNS hexadecimal token"             },
-     {apns_version,    $v,        "apns-version",    {integer,  2},           "APNS protocol version"              },
+     {apns_token,      $t,        "apns-token",      {string, ""},            "APNS hexadecimal token"             },
+     {apns_version,    $v,        "apns-version",    {integer,  3},           "APNS protocol version"              },
      {badge,           $b,        "badge",           {integer, -1},           "APNS badge count [-1: unchanged]"   },
      {help,            $h,        "help",            undefined,               "Show help"                          },
+     {file,            $f,        "file",            {string, ""},            "File of cert/key/tokens"            },
      {message,         $m,        "message",         string,                  "APNS alert text"                    },
      {raw_json,        $r,        "raw-json",        {string, ""},            "Raw APNS JSON notification"         },
      {sound,           $s,        "sound",           {string, ""},            "APNS sound file name               "},
@@ -90,8 +92,8 @@ make_checked_action_cfg(OptSpecList, Opts, NonOpts) ->
 make_action_cfg(Opts, []) ->
     try
         Action = get_action(Opts),
-        AptestCfg = make_aptest_cfg(Opts),
-        SslCfg = make_ssl_cfg(Opts),
+        AptestCfg = make_aptest_cfg(Action, Opts),
+        SslCfg = make_ssl_cfg(Action, Opts),
         Cfg = [{aptest, AptestCfg}, {ssl_opts, SslCfg}],
         {ok, {Action, Cfg}}
     catch
@@ -108,8 +110,9 @@ help_wanted(Opts) ->
 -spec get_action(Opts) -> Result when
       Opts :: options(), Result :: action().
 get_action(Opts) ->
-    L = lists:foldl(fun(action_send,  Acc) -> [action_send | Acc];
-                       (_           , Acc) -> Acc
+    L = lists:foldl(fun(action_send,     Acc) -> [action_send | Acc];
+                       (action_sendfile, Acc) -> [action_sendfile | Acc];
+                       (_,               Acc) -> Acc
                     end, [], Opts),
     case L of
         [] ->
@@ -118,28 +121,26 @@ get_action(Opts) ->
             Action;
         [_|_] ->
             Actions = action_list(option_spec_list()),
-            throw({invalid_option, "supported actions: '" ++ Actions ++ "'"})
+            throw({'Provide only one of', "'" ++ Actions ++ "'"})
     end.
 
-make_aptest_cfg(Opts) ->
-    [
-     verbose(Opts),
-     apns_env(Opts),
-     apns_port(Opts),
-     apns_version(Opts),
-     apns_token(Opts),
-     badge(Opts),
-     message(Opts),
-     raw_json(Opts),
-     sound(Opts)
-    ].
+make_aptest_cfg(action_send, Opts) ->
+    ValFuns = [fun verbose/1, fun apns_env/1, fun apns_port/1,
+               fun apns_version/1, fun apns_token/1, fun badge/1,
+               fun message/1, fun raw_json/1, fun sound/1],
+    lists:foldl(fun(ValFun, Acc) -> [ValFun(Opts)|Acc] end, [], ValFuns);
+make_aptest_cfg(action_sendfile, Opts) ->
+    ValFuns = [fun verbose/1, fun apns_env/1, fun apns_port/1, fun file/1,
+               fun badge/1, fun message/1, fun raw_json/1, fun sound/1],
+    lists:foldl(fun(ValFun, Acc) -> [ValFun(Opts)|Acc] end, [], ValFuns).
 
-make_ssl_cfg(Opts) ->
+make_ssl_cfg(action_send, Opts) ->
     [
         apns_cert(Opts),
         apns_key(Opts)
-    ].
-
+    ];
+make_ssl_cfg(action_sendfile, _Opts) ->
+    [].
 
 apns_cert(Opts) ->
     Pred = fun(V) -> is_list(V) andalso filelib:is_regular(V) end,
@@ -165,6 +166,10 @@ apns_version(Opts) ->
     Pred = fun(V) -> is_integer_range(V, ?MIN_APNS_VER, ?MAX_APNS_VER) end,
     assert_prop(Pred, apns_version, Opts).
 
+file(Opts) ->
+    Pred = fun(V) -> is_nonempty_string(V) end,
+    assert_prop(Pred, file, Opts).
+
 badge(Opts) ->
     Pred = fun(V) -> is_integer_range(V, -1, ?MAX_APNS_BADGE) end,
     assert_prop(Pred, badge, Opts).
@@ -188,7 +193,10 @@ verbose(Opts) ->
 
 assert_prop(Pred, Key, Props) when is_function(Pred, 1), is_list(Props) ->
     Prop = aptest_util:req_prop(Key, Props),
-    Exc = {invalid_option_arg, Prop},
+    Exc = case Prop of
+              {Key, []} -> {missing_required_option, Key};
+              _         -> {invalid_option_arg, Prop}
+          end,
     aptest_util:map_prop(assert_or_die_fun(Pred, Exc), Prop).
 
 assert_or_die_fun(Pred, Exc) ->

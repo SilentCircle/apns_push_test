@@ -61,6 +61,8 @@ run(action_default, Config) ->
     run(action_send, Config);
 run(action_send, Config) ->
     send(Config);
+run(action_sendfile, Config) ->
+    send_file(Config);
 run(Action, Config) ->
     msg("Action: ~p~nConfig:~n~p~n", [Action, Config]),
     {error, "Unhandled action: " ++ to_s(Action)}.
@@ -96,7 +98,7 @@ send(Config) ->
     {_, AptestCfg} = aptest_util:req_prop(aptest, Config),
     {_, SSLCfg} = aptest_util:req_prop(ssl_opts, Config),
 
-    application:ensure_all_started(ssl),
+    {ok, _Apps} = application:ensure_all_started(ssl),
 
     APNSVersion = sc_util:req_val(apns_version, AptestCfg),
     Mod = list_to_atom("aptest_apnsv" ++ integer_to_list(APNSVersion)),
@@ -109,7 +111,7 @@ send(Config) ->
                     Notification = make_notification(Message, Badge, Sound),
                     apns_json:make_notification(Notification);
                RawJSON ->
-                   RawJSON
+                   sc_util:to_bin(RawJSON)
            end,
 
     APNSCert = sc_util:req_val(apns_cert, SSLCfg),
@@ -117,7 +119,7 @@ send(Config) ->
     SSLOpts = Mod:make_ssl_opts(APNSCert, APNSKey),
     Opts = [{ssl_opts, SSLOpts}],
 
-    Token = sc_util:req_val(apns_token, AptestCfg),
+    Token = sc_util:to_bin(sc_util:req_val(apns_token, AptestCfg)),
     APNSEnv = sc_util:req_val(apns_env, AptestCfg),
 
     case Mod:send(Token, JSON, Opts, APNSEnv) of
@@ -130,6 +132,56 @@ send(Config) ->
         Error ->
             msg("Error: ~p~n", [Error]),
             2
+    end.
+
+send_file(Config) ->
+    {_, AptestCfg} = aptest_util:req_prop(aptest, Config),
+
+    {ok, _Apps} = application:ensure_all_started(ssl),
+
+    case sc_util:val(apns_version, AptestCfg) of
+        X when X =:= undefined; X =:= 3 ->
+            ok;
+        V ->
+            msg("--file only works with APNS v3, ignoring version ~B", [V])
+    end,
+    Mod = aptest_apnsv3,
+
+    Filename = sc_util:req_val(file, AptestCfg),
+    JSON = case sc_util:req_val(raw_json, AptestCfg) of
+               [] ->
+                   Message = sc_util:req_val(message, AptestCfg),
+                   Badge = sc_util:req_val(badge, AptestCfg),
+                   Sound = sc_util:req_val(sound, AptestCfg),
+                   Notification = make_notification(Message, Badge, Sound),
+                   apns_json:make_notification(Notification);
+               RawJSON ->
+                   sc_util:to_bin(RawJSON)
+           end,
+    %% Results :: list(CertKeyResult),
+    %% CertKeyResult :: {{CertFilename,KeyFilename}, [Result]}
+    _ = [handle_sendfile_result(Result, Mod)
+         || Result <- Mod:send_file(Filename, JSON)],
+    0
+    .
+
+handle_sendfile_result({{CertFile,KeyFile}, Results}, Mod) ->
+    {Good, Bad} = lists:partition(fun({ok, _}) -> true;
+                                     (_)       -> false
+                                  end, Results),
+
+    msg("Results for cert file ~s, key file ~s\n", [CertFile, KeyFile]),
+    msg("Successes: ~B, Failures: ~B\n\n", [length(Good), length(Bad)]),
+    case Bad of
+        [] ->
+            0;
+        _ ->
+            lists:foreach(
+              fun({error, {AE, Token}}) ->
+                    msg("Error for ~s:\n~s\n",
+                        [Token, Mod:format_apns_error(AE)])
+              end, Bad),
+            1
     end.
 
 make_notification(Message, Badge, Sound) ->
@@ -145,4 +197,4 @@ maybe_badge(N) when is_integer(N) ->
 maybe_sound("") ->
     [];
 maybe_sound(Sound) ->
-    [{sound, sc_util:to_b(Sound)}].
+    [{sound, sc_util:to_bin(Sound)}].

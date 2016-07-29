@@ -11,7 +11,13 @@
                   kernel,
                   stdlib,
                   ssl,
-                  apns_erl_util
+                  chatterbox,
+                  getopt,
+                  jsx,
+                  lager,
+                  uuid,
+                  apns_erl_util,
+                  sc_util
                  ]},
   {mod, { aptest_app, []}},
   {env, []}
