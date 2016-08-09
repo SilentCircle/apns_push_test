@@ -127,10 +127,10 @@ send(Config) ->
             msg("Pushed without receiving APNS error!~n", []),
             0;
         {error, AE} ->
-            msg("APNS error: ~s~n", [Mod:format_apns_error(AE)]),
+            msg("APNS error:~n~s~n", [Mod:format_apns_error(AE)]),
             1;
         Error ->
-            msg("Error: ~p~n", [Error]),
+            msg("Error:~n~p~n", [Error]),
             2
     end.
 

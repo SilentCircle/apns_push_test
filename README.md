@@ -108,7 +108,6 @@ make
 
 * The `--apns-port` option is currently ignored. Ports are chosen based on which APNS version is being used (v2: 2195; v3: 443).
 * It has not been tested with `--raw-json`.
-* It needs to be run through dialyzer.
 
 # Other information
 

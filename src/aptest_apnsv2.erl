@@ -7,13 +7,12 @@
 
 -import(aptest_util, [msg/2]).
 
--include("apns_recs.hrl").
-
 %%--------------------------------------------------------------------
 -spec send(Token, JSON, Opts, Env) -> Result
-    when Token :: string(), JSON :: string() | binary(), Opts :: list(),
-         Env :: prod | dev,
-         Result :: ok | {error, term()}.
+    when Token :: string() | binary(), JSON :: string() | binary(),
+         Opts :: list(), Env :: prod | dev, Result :: ok | {error, term()}.
+send(Token, JSON, Opts, Env) when is_binary(Token) ->
+    send(binary_to_list(Token), JSON, Opts, Env);
 send(Token, JSON, Opts, Env) when Env =:= prod; Env =:= dev ->
     BToken = sc_util:hex_to_bitstring(Token),
     {Host, Port} = host_info(Env),
@@ -39,10 +38,10 @@ send(Token, JSON, Opts, Env) when Env =:= prod; Env =:= dev ->
     end.
 
 %%--------------------------------------------------------------------
-format_apns_error(#apns_error{id = Id,
-                              status = S,
-                              status_code = SC,
-                              status_desc = SD}) ->
+format_apns_error(R) ->
+    true = apns_recs:'#is_record-'(apns_error, R),
+    Fields = [id,status,status_code,status_desc],
+    [Id, S, SC, SD] = apns_recs:'#get-apns_error'(Fields, R),
     io_lib:format("id: ~B status: ~p status_code: ~B status_desc: ~s~n",
                   [Id, S, SC, SD]).
 
@@ -76,23 +75,22 @@ wait_for_resp(Timeout, Status) ->
 
 %%--------------------------------------------------------------------
 handle_response(Data) ->
-    case apns_lib:decode_error_packet(Data) of
-        #apns_error{} = Err ->
-            {error, Err};
-        _Error ->
+    Res = apns_lib:decode_error_packet(Data),
+    case apns_recs:'#is_record-'(apns_error, Res) of
+        true ->
+            {error, Res};
+        false ->
             {error, {unrecognized, Data}}
     end.
 
 %%--------------------------------------------------------------------
 check_packet(Packet) ->
-    case apns_lib:decode(Packet) of
-        #apns_notification{cmd      = Cmd,
-                           id       = Id,
-                           expire   = Expire,
-                           token    = Token,
-                           payload  = Payload,
-                           priority = Priority,
-                           rest     = Rest} ->
+    Res = apns_lib:decode(Packet),
+    case apns_recs:'#is_record-'(apns_notification, Res) of
+        true ->
+            Fields = [cmd, id, expire, token, payload, priority, rest],
+            [Cmd, Id, Expire, Token, Payload,
+             Priority, Rest] = apns_recs:'#get-apns_notification'(Fields, Res),
             msg("Packet decode check:~n~n"
                 "Command version: ~p~n"
                 "Notification ID: ~B~n"
