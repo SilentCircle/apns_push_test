@@ -59,7 +59,7 @@ send(Token, JSON, Opts, Env) when Env =:= prod; Env =:= dev ->
     SSLOpts = sc_util:req_val(ssl_opts, Opts),
     CertFileName = sc_util:req_val(certfile, SSLOpts),
     AppBundleID = hd(get_bundle_ids(CertFileName)),
-    {APNSHost, APNSPort} = host_info(Env),
+    {APNSHost, APNSPort} = aptest_util:get_apns_conninfo(Env, Opts),
     msg("Connecting with HTTP/2 to ~s:~B~n", [APNSHost, APNSPort]),
     {ok, Pid} = start_client(APNSHost, APNSPort, SSLOpts),
     msg("Connected.~n", []),
@@ -83,7 +83,10 @@ send_file(Filename, JSON) ->
          JSON :: json(), Tokens :: tokens(),
          Results :: send_mult_results().
 send_mult(APNSCert, APNSKey, JSON, Tokens) ->
-    {APNSHost, APNSPort} = host_info(prod), % For now
+    %% TODO: Identify prod/dev from cert, using ext v3 info
+    %% 1.2.840.113635.100.6.3.1  = Development
+    %% 1.2.840.113635.100.6.3.2  = Production
+    {APNSHost, APNSPort} = aptest_util:host_info(prod), % For now
     Topic = get_topic(APNSCert),
     SSLOpts = make_ssl_opts(APNSCert, APNSKey),
     Wrap = fun(ok, Tok) ->
@@ -379,9 +382,6 @@ make_ssl_opts(APNSCert, APNSKey) ->
      {alpn_preferred_protocols, [<<"h2">>]}].
 
 %%--------------------------------------------------------------------
-host_info(prod) -> {"api.push.apple.com", 443};
-host_info(dev) -> {"api.development.push.apple.com", 443}.
-
 posix_ms_to_iso8601(TS) ->
     now_to_iso8601(posix_ms_to_timestamp(TS)).
 

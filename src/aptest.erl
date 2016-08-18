@@ -117,7 +117,7 @@ send(Config) ->
     APNSCert = sc_util:req_val(apns_cert, SSLCfg),
     APNSKey = sc_util:req_val(apns_key, SSLCfg),
     SSLOpts = Mod:make_ssl_opts(APNSCert, APNSKey),
-    Opts = [{ssl_opts, SSLOpts}],
+    Opts = [{ssl_opts, SSLOpts} | AptestCfg],
 
     Token = sc_util:to_bin(sc_util:req_val(apns_token, AptestCfg)),
     APNSEnv = sc_util:req_val(apns_env, AptestCfg),

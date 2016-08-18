@@ -5,10 +5,14 @@
         do_rpc/4,
         do_rpc/5,
         err_msg/2,
+        get_apns_conninfo/2,
         hexdump/1,
+        host_info/1,
         map_prop/2,
         msg/2,
         ping_until_timeout/3,
+        prop/2,
+        prop/3,
         req_prop/2,
         set_dist_ports/2,
         sleep/1,
@@ -154,6 +158,17 @@ req_prop(K, PL) ->
             throw({missing_required_key, K})
     end.
 
+prop(K, PL) ->
+    prop(K, PL, undefined).
+
+prop(K, PL, Default) ->
+    case lists:keysearch(K, 1, PL) of
+        {value, KV} ->
+            KV;
+        false ->
+            Default
+    end.
+
 %%--------------------------------------------------------------------
 %% Internal functions
 %%--------------------------------------------------------------------
@@ -201,4 +216,18 @@ iso8601_ts() ->
     {{Yr, Mo, Dy}, {H, M, S}} = calendar:now_to_universal_time(Now),
     io_lib:format("~4..0B-~2..0B-~2..0BT~2..0B:~2..0B:~2..0B.~6..0BZ",
                   [Yr, Mo, Dy, H, M, S, Micros]).
+
+
+host_info(prod) -> {"api.push.apple.com", 443};
+host_info(dev) ->  {"api.development.push.apple.com", 443}.
+
+get_apns_conninfo(Env, Opts) ->
+    {DefHost, DefPort} = host_info(Env),
+    Host = case string:strip(proplists:get_value(apns_host, Opts, "")) of
+               "" -> DefHost;
+               H  -> H
+           end,
+    {_, Port} = prop(apns_port, Opts, DefPort),
+    {Host, Port}.
+
 

@@ -20,24 +20,29 @@ make
 
 # Usage
 
-    Usage: aptest [--send] [-c <apns_cert>] [-e [<apns_env>]] [-k <apns_key>]
-                  [-p [<apns_port>]] [-t <apns_token>] [-v [<apns_version>]]
-                  [-b [<badge>]] [-h] [-m <message>] [-r [<raw_json>]]
+    Usage: aptest [--send] [--sendfile] [-c [<apns_cert>]] [-e [<apns_env>]]
+                  [-k [<apns_key>]] [-H [<apns_host>]] [-p [<apns_port>]]
+                  [-t [<apns_token>]] [-v [<apns_version>]] [-b [<badge>]]
+                  [-h] [-f [<file>]] [-m <message>] [-r [<raw_json>]]
                   [-s [<sound>]] [-V [<verbose>]]
 
       --send              Send notification
-      -c, --apns-cert     APNS certificate file
+      --sendfile          Send notifications from file
+      -c, --apns-cert     APNS certificate file [default: ]
       -e, --apns-env      APNS environment (prod|dev) [default: prod]
-      -k, --apns-key      APNS private key file
-      -p, --apns-port     APNS port [default: 2197]
-      -t, --apns-token    APNS hexadecimal token
-      -v, --apns-version  APNS protocol version [default: 2]
+      -k, --apns-key      APNS private key file [default: ]
+      -H, --apns-host     APNS host (optional) [default: ]
+      -p, --apns-port     APNS port (optional) [default: 2197]
+      -t, --apns-token    APNS hexadecimal token [default: ]
+      -v, --apns-version  APNS protocol version [default: 3]
       -b, --badge         APNS badge count [-1: unchanged] [default: -1]
       -h, --help          Show help
+      -f, --file          File of cert/key/tokens [default: ]
       -m, --message       APNS alert text
       -r, --raw-json      Raw APNS JSON notification [default: ]
       -s, --sound         APNS sound file name                [default: ]
       -V, --verbose       Verbose output [default: false]
+
 
 ---
 

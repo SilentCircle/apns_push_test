@@ -29,7 +29,8 @@ option_spec_list() ->
      {apns_cert,       $c,        "apns-cert",       {string, ""},            "APNS certificate file"              },
      {apns_env,        $e,        "apns-env",        {atom, prod},            "APNS environment (prod|dev)"        },
      {apns_key,        $k,        "apns-key",        {string, ""},            "APNS private key file"              },
-     {apns_port,       $p,        "apns-port",       {integer, 2197},         "APNS port"                          },
+     {apns_host,       $H,        "apns-host",       {string, ""},            "APNS host (optional)"               },
+     {apns_port,       $p,        "apns-port",       {integer, 2197},         "APNS port (optional)"               },
      {apns_token,      $t,        "apns-token",      {string, ""},            "APNS hexadecimal token"             },
      {apns_version,    $v,        "apns-version",    {integer,  3},           "APNS protocol version"              },
      {badge,           $b,        "badge",           {integer, -1},           "APNS badge count [-1: unchanged]"   },
@@ -125,13 +126,14 @@ get_action(Opts) ->
     end.
 
 make_aptest_cfg(action_send, Opts) ->
-    ValFuns = [fun verbose/1, fun apns_env/1, fun apns_port/1,
-               fun apns_version/1, fun apns_token/1, fun badge/1,
-               fun message/1, fun raw_json/1, fun sound/1],
+    ValFuns = [fun verbose/1, fun apns_env/1, fun apns_host/1, fun apns_port/1,
+               fun apns_version/1, fun apns_token/1, fun badge/1, fun
+               message/1, fun raw_json/1, fun sound/1],
     lists:foldl(fun(ValFun, Acc) -> [ValFun(Opts)|Acc] end, [], ValFuns);
 make_aptest_cfg(action_sendfile, Opts) ->
-    ValFuns = [fun verbose/1, fun apns_env/1, fun apns_port/1, fun file/1,
-               fun badge/1, fun message/1, fun raw_json/1, fun sound/1],
+    ValFuns = [fun verbose/1, fun apns_env/1, fun apns_host/1, fun apns_port/1,
+               fun file/1, fun badge/1, fun message/1, fun raw_json/1, fun
+               sound/1],
     lists:foldl(fun(ValFun, Acc) -> [ValFun(Opts)|Acc] end, [], ValFuns).
 
 make_ssl_cfg(action_send, Opts) ->
@@ -153,6 +155,10 @@ apns_env(Opts) ->
 apns_key(Opts) ->
     Pred = fun(V) -> is_list(V) andalso filelib:is_regular(V) end,
     assert_prop(Pred, apns_key, Opts).
+
+apns_host(Opts) ->
+    Pred = fun(V) -> is_string(V) end,
+    assert_prop(Pred, apns_host, Opts).
 
 apns_port(Opts) ->
     Pred = fun(V) -> is_pos_integer_range(V, 16#FFFF) end,
@@ -206,6 +212,12 @@ assert_or_die_fun(Pred, Exc) ->
                 false -> throw(Exc)
             end
     end.
+
+-spec is_string(term()) -> boolean().
+is_string(X) when is_binary(X) ->
+    is_string(binary_to_list(X));
+is_string(X) ->
+    io_lib:printable_unicode_list(X).
 
 -spec is_nonempty_string(term()) -> boolean().
 is_nonempty_string(X) when is_binary(X) ->
