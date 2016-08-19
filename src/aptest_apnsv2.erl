@@ -1,11 +1,38 @@
 -module(aptest_apnsv2).
 -export([
+         connect/2,
          send/4,
          format_apns_error/1,
          make_ssl_opts/2
         ]).
 
--import(aptest_util, [msg/2]).
+-import(aptest_util, [msg/2, msg/3, err_msg/2, err_msg/3]).
+
+%%--------------------------------------------------------------------
+start_client(Host, Port, SSLOpts) ->
+    msg("Connecting over TLS to ~s:~B~n", [Host, Port]),
+    {T, Result} = timer:tc(ssl, connect, [Host, Port, SSLOpts]),
+    msg("Connected in ~B microseconds.~n", [T]),
+    Result.
+
+%%--------------------------------------------------------------------
+stop_client(Sock) ->
+    ssl:close(Sock).
+
+%%--------------------------------------------------------------------
+-spec connect(Opts, Env) -> Result
+    when Opts :: list(), Env :: prod | dev,
+         Result :: ok | {error, term()}.
+connect(Opts, Env) when Env =:= prod; Env =:= dev ->
+    {Host, Port} = host_info(Env),
+    SSLOpts = sc_util:req_val(ssl_opts, Opts),
+    case start_client(Host, Port, SSLOpts) of
+        {ok, Sock} ->
+            msg("Connected OK, disconnecting.~n", []),
+            stop_client(Sock);
+        Error ->
+            Error
+    end.
 
 %%--------------------------------------------------------------------
 -spec send(Token, JSON, Opts, Env) -> Result
@@ -17,9 +44,7 @@ send(Token, JSON, Opts, Env) when Env =:= prod; Env =:= dev ->
     BToken = sc_util:hex_to_bitstring(Token),
     {Host, Port} = host_info(Env),
     SSLOpts = sc_util:req_val(ssl_opts, Opts),
-    msg("Connecting over TLS to ~s:~B~n", [Host, Port]),
-    {ok, Sock} = ssl:connect(Host, Port, SSLOpts),
-    msg("Connected.~n", []),
+    {ok, Sock} = start_client(Host, Port, SSLOpts),
     try
         Packet = apns_lib:encode_v2(1, 16#FFFFFFFF, BToken, JSON, 10),
         check_packet(Packet),
@@ -34,7 +59,7 @@ send(Token, JSON, Opts, Env) when Env =:= prod; Env =:= dev ->
                 Error
         end
     after
-        ssl:close(Sock)
+        stop_client(Sock)
     end.
 
 %%--------------------------------------------------------------------
@@ -57,6 +82,7 @@ make_ssl_opts(APNSCert, APNSKey) ->
 wait_for_resp(Timeout) ->
     wait_for_resp(Timeout, ok).
 
+%%--------------------------------------------------------------------
 wait_for_resp(Timeout, Status) ->
     receive
         {ssl, _Socket, Data} ->
@@ -100,13 +126,14 @@ check_packet(Packet) ->
                 "Priority       : ~B~n"
                 "Rest           : ~p~n~n",
                 [Cmd, Id, Expire, sc_util:bitstring_to_hex(Token),
-                 Payload, Priority, Rest]);
+                 Payload, Priority, Rest], no_ts);
         Error ->
-            msg("Error doing packet decode check: ~p~n", [Error])
+            err_msg("Error doing packet decode check: ~p~n", [Error])
     end.
 
 %%--------------------------------------------------------------------
 host_info(prod) -> {"gateway.push.apple.com", 2195};
 host_info(dev) -> {"gateway.sandbox.push.apple.com", 2195}.
 
+% ex: set ft=erlang fenc=utf-8 sts=4 ts=4 sw=4 et:
 

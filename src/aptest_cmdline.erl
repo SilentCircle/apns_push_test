@@ -26,6 +26,8 @@ option_spec_list() ->
     [
      {action_send,     undefined, "send",            undefined,               "Send notification"                  },
      {action_sendfile, undefined, "sendfile",        undefined,               "Send notifications from file"       },
+     {action_connect,  undefined, "connect",         undefined,               "Test connection to APNS"            },
+     {action_showcert, undefined, "showcert",        undefined,               "Show certificate information"       },
      {apns_cert,       $c,        "apns-cert",       {string, ""},            "APNS certificate file"              },
      {apns_env,        $e,        "apns-env",        {atom, prod},            "APNS environment (prod|dev)"        },
      {apns_key,        $k,        "apns-key",        {string, ""},            "APNS private key file"              },
@@ -36,10 +38,11 @@ option_spec_list() ->
      {badge,           $b,        "badge",           {integer, -1},           "APNS badge count [-1: unchanged]"   },
      {help,            $h,        "help",            undefined,               "Show help"                          },
      {file,            $f,        "file",            {string, ""},            "File of cert/key/tokens"            },
-     {message,         $m,        "message",         string,                  "APNS alert text"                    },
+     {message,         $m,        "message",         {string, ""},            "APNS alert text"                    },
      {raw_json,        $r,        "raw-json",        {string, ""},            "Raw APNS JSON notification"         },
-     {sound,           $s,        "sound",           {string, ""},            "APNS sound file name               "},
-     {verbose,         $V,        "verbose",         {boolean, false},        "Verbose output"                     }
+     {sound,           $s,        "sound",           {string, ""},            "APNS sound file name"               },
+     {verbose,         $V,        "verbose",         {boolean, false},        "Verbose output"                     },
+     {version,         undefined, "version",         undefined,               "Show aptest version"                }
     ].
 
 -spec parse_args(Args) -> Result when
@@ -67,11 +70,11 @@ usage(PgmName) ->
       Result :: {ok, {Action, Config}} | {error, Reason},
       Action :: action(), Config :: config(), Reason :: term().
 make_action_cfg(OptSpecList, Opts, NonOpts) ->
-    case help_wanted(Opts) of
-        true ->
-            {ok, {action_help, []}};
-        false ->
-            make_checked_action_cfg(OptSpecList, Opts, NonOpts)
+    case info_action(Opts) of
+        none ->
+            make_checked_action_cfg(OptSpecList, Opts, NonOpts);
+        Action ->
+            Action
     end.
 
 -spec make_checked_action_cfg(OptSpecList, Opts, NonOpts) -> Result when
@@ -104,27 +107,36 @@ make_action_cfg(Opts, []) ->
 make_action_cfg(_Opts, NonOpts) ->
     {error, {invalid_arg, NonOpts}}.
 
--spec help_wanted(Opts) -> boolean() when Opts :: options().
-help_wanted(Opts) ->
-    lists:member(help, Opts).
+-spec info_action(Opts) -> Result when
+      Opts :: options(), Result :: {ok, {atom(), []}} | none.
+info_action(Opts) ->
+    lists:foldl(fun(help, none)    -> atom_to_action(help);
+                   (version, none) -> atom_to_action(version);
+                   (_, Acc)        -> Acc
+                end, none, Opts).
 
 -spec get_action(Opts) -> Result when
       Opts :: options(), Result :: action().
 get_action(Opts) ->
     L = lists:foldl(fun(action_send,     Acc) -> [action_send | Acc];
                        (action_sendfile, Acc) -> [action_sendfile | Acc];
+                       (action_connect,  Acc) -> [action_connect | Acc];
+                       (action_showcert,  Acc) -> [action_showcert | Acc];
                        (_,               Acc) -> Acc
                     end, [], Opts),
     case L of
-        [] ->
-            action_default;
         [Action] ->
             Action;
-        [_|_] ->
+        L when is_list(L) ->
             Actions = action_list(option_spec_list()),
-            throw({'Provide only one of', "'" ++ Actions ++ "'"})
+            throw({'Provide one of the following actions',
+                   "'" ++ Actions ++ "'"})
     end.
 
+make_aptest_cfg(action_connect, Opts) ->
+    ValFuns = [fun verbose/1, fun apns_env/1, fun apns_host/1, fun apns_port/1,
+               fun apns_version/1],
+    lists:foldl(fun(ValFun, Acc) -> [ValFun(Opts)|Acc] end, [], ValFuns);
 make_aptest_cfg(action_send, Opts) ->
     ValFuns = [fun verbose/1, fun apns_env/1, fun apns_host/1, fun apns_port/1,
                fun apns_version/1, fun apns_token/1, fun badge/1, fun
@@ -134,15 +146,27 @@ make_aptest_cfg(action_sendfile, Opts) ->
     ValFuns = [fun verbose/1, fun apns_env/1, fun apns_host/1, fun apns_port/1,
                fun file/1, fun badge/1, fun message/1, fun raw_json/1, fun
                sound/1],
+    lists:foldl(fun(ValFun, Acc) -> [ValFun(Opts)|Acc] end, [], ValFuns);
+make_aptest_cfg(action_showcert, Opts) ->
+    ValFuns = [fun verbose/1],
     lists:foldl(fun(ValFun, Acc) -> [ValFun(Opts)|Acc] end, [], ValFuns).
 
+make_ssl_cfg(action_connect, Opts) ->
+    [
+        apns_cert(Opts),
+        apns_key(Opts)
+    ];
 make_ssl_cfg(action_send, Opts) ->
     [
         apns_cert(Opts),
         apns_key(Opts)
     ];
 make_ssl_cfg(action_sendfile, _Opts) ->
-    [].
+    [];
+make_ssl_cfg(action_showcert, Opts) ->
+    [
+        apns_cert(Opts)
+    ].
 
 apns_cert(Opts) ->
     Pred = fun(V) -> is_list(V) andalso filelib:is_regular(V) end,
@@ -276,3 +300,8 @@ show_parse_results(Opts, NonOpts) ->
             ok
     end.
 
+atom_to_action(Atom) when is_atom(Atom) ->
+    Action = list_to_atom("action_" ++ atom_to_list(Atom)),
+    {ok, {Action, []}}.
+
+% ex: set ft=erlang fenc=utf-8 sts=4 ts=4 sw=4 et:

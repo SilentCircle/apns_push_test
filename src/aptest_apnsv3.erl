@@ -6,24 +6,18 @@
          make_ssl_opts/2
         ]).
 
--import(aptest_util, [msg/2, to_b/1]).
+-import(aptest_util, [msg/2]).
+-import(sc_util, [to_bin/1, to_list/1]).
 
 -include_lib("public_key/include/public_key.hrl").
-
-%% TODO: Move this to an include file in apns_erl_util.
--record(cert_info, {
-        issuer_cn = <<>> :: binary(),
-        is_production = false :: boolean(),
-        bundle_id = <<>> :: binary(),
-        bundle_seed_id = <<>> :: binary()
-    }).
 
 %%%-------------------------------------------------------------------
 %%% Types
 %%%-------------------------------------------------------------------
--type json() :: binary().
--type token() :: binary().
 -type apns_env() :: prod | dev.
+-type json() :: binary().
+-type topic() :: binary().
+-type token() :: binary().
 -type tokens() :: [token()].
 -type cert_filename() :: string().
 -type key_filename() :: string().
@@ -31,6 +25,8 @@
 -type http2_headers() :: [http2_header()].
 -type http2_body() :: [binary()].
 -type http2_resp() :: {http2_headers(), http2_body()}.
+-type connect_error() :: {error, http2_resp()}.
+-type connect_result() :: ok | connect_error().
 -type send_error() :: {error, http2_resp()}.
 -type send_result() :: ok | send_error().
 -type apns_cert_files() :: {cert_filename(), key_filename()}.
@@ -44,28 +40,54 @@
 %%%-------------------------------------------------------------------
 
 %%--------------------------------------------------------------------
+-spec start_client(Host, Port, SSLOpts) -> Result when
+      Host :: string(), Port :: non_neg_integer(),
+      SSLOpts :: [term()], Result :: {ok, pid()} | {error, term()}.
 start_client(Host, Port, SSLOpts) ->
-    h2_client:start_link(https, Host, Port, SSLOpts).
+    msg("Connecting with HTTP/2 to ~s:~B~n", [Host, Port]),
+    {T, Result} = timer:tc(h2_client, start_link,
+                           [https, Host, Port, SSLOpts]),
+    msg("Connected in ~B microseconds.~n", [T]),
+    Result.
 
 %%--------------------------------------------------------------------
+-spec stop_client(Pid) -> ok when Pid :: pid().
 stop_client(Pid) ->
     ok = h2_client:stop(Pid).
 
 %%--------------------------------------------------------------------
--spec send(Token, JSON, Opts, Env) -> Result
-    when Token :: token(), JSON :: json(), Opts :: list(),
-         Env :: apns_env(), Result :: send_result().
+-spec connect(Opts, Env) -> Result
+    when Opts :: list(), Env :: apns_env(), Result :: connect_result().
+connect(Opts, Env) when Env =:= prod; Env =:= dev ->
+    SSLOpts = sc_util:req_val(ssl_opts, Opts),
+    {Host, Port} = get_apns_conninfo(Env, Opts),
+    case start_client(Host, Port, SSLOpts) of
+        {ok, Pid} ->
+            msg("Connected ok, disconnecting.~n", []),
+            _ = stop_client(Pid);
+        Error ->
+            Error
+    end.
+
+%%--------------------------------------------------------------------
+-spec send(Token, JSON, Opts, Env) -> Result when
+      Token :: token(), JSON :: json(), Opts :: list(),
+      Env :: apns_env(), Result :: send_result().
 send(Token, JSON, Opts, Env) when Env =:= prod; Env =:= dev ->
     SSLOpts = sc_util:req_val(ssl_opts, Opts),
-    CertFileName = sc_util:req_val(certfile, SSLOpts),
-    AppBundleID = hd(get_bundle_ids(CertFileName)),
-    {APNSHost, APNSPort} = aptest_util:get_apns_conninfo(Env, Opts),
-    msg("Connecting with HTTP/2 to ~s:~B~n", [APNSHost, APNSPort]),
-    {ok, Pid} = start_client(APNSHost, APNSPort, SSLOpts),
-    msg("Connected.~n", []),
-    Response = send_impl(Pid, Token, AppBundleID, JSON),
-    _ = stop_client(Pid),
-    Response.
+    APNSCert = sc_util:req_val(certfile, SSLOpts),
+    Topic = get_topic(APNSCert),
+    {Host, Port} = get_apns_conninfo(Env, Opts),
+    case start_client(Host, Port, SSLOpts) of
+        {ok, Pid} ->
+            try
+                send_impl(Pid, Token, Topic, JSON)
+            after
+                _ = stop_client(Pid)
+            end;
+        Error ->
+            Error
+    end.
 
 %%--------------------------------------------------------------------
 -spec send_file(Filename, JSON) -> Results
@@ -83,10 +105,8 @@ send_file(Filename, JSON) ->
          JSON :: json(), Tokens :: tokens(),
          Results :: send_mult_results().
 send_mult(APNSCert, APNSKey, JSON, Tokens) ->
-    %% TODO: Identify prod/dev from cert, using ext v3 info
-    %% 1.2.840.113635.100.6.3.1  = Development
-    %% 1.2.840.113635.100.6.3.2  = Production
-    {APNSHost, APNSPort} = aptest_util:host_info(prod), % For now
+    Env = get_cert_env(APNSCert),
+    {Host, Port} = host_info(Env),
     Topic = get_topic(APNSCert),
     SSLOpts = make_ssl_opts(APNSCert, APNSKey),
     Wrap = fun(ok, Tok) ->
@@ -95,49 +115,50 @@ send_mult(APNSCert, APNSKey, JSON, Tokens) ->
                    {error, {Err, Tok}}
            end,
 
-    msg("Connecting with HTTP/2 to ~s:~B~n", [APNSHost, APNSPort]),
-    {ok, Pid} = start_client(APNSHost, APNSPort, SSLOpts),
-    msg("Connected.~n", []),
-    Results = try
-                  [Wrap(send_impl(Pid, Tok, Topic, JSON), Tok)
-                   || Tok <- Tokens]
-              after
-                  _ = stop_client(Pid),
-                  msg("Disconnected.~n", [])
-              end,
-    Results.
+    case start_client(Host, Port, SSLOpts) of
+        {ok, Pid} ->
+            try
+                [Wrap(send_impl(Pid, Tok, Topic, JSON), Tok)
+                 || Tok <- Tokens]
+            after
+                _ = stop_client(Pid),
+                msg("Disconnected.~n", [])
+            end;
+        Error ->
+            Error
+    end.
 
 %%--------------------------------------------------------------------
--spec send_impl(Pid, Token, Topic, JSON) -> Result
-    when Pid :: pid(), Token :: token(), Topic :: binary(),
-         JSON :: json(), Result :: send_result().
+-spec send_impl(Pid, Token, Topic, JSON) -> Result when
+      Pid :: pid(), Token :: token(), Topic :: topic(), JSON :: json(),
+      Result :: send_result().
 send_impl(Pid, Token, Topic, JSON) ->
-    HTTPPath = to_b("/3/device/" ++ Token),
-    ReqUUID = to_b(uuid:uuid_to_string(uuid:get_v4())),
+    HTTPPath = to_bin([<<"/3/device/">>, Token]),
+    ReqUUID = to_bin(uuid:uuid_to_string(uuid:get_v4())),
     ReqHdrs = [{<<":method">>, <<"POST">>},
                {<<":path">>, HTTPPath},
                {<<":scheme">>, <<"https">>},
                {<<"apns-id">>, ReqUUID},
-               {<<"apns-topic">>, to_b(Topic)}
+               {<<"apns-topic">>, Topic}
               ],
 
-    ReqBody = to_b(JSON),
+    ReqBody = JSON,
+    sync_req(Pid, ReqHdrs, ReqBody).
+
+%%--------------------------------------------------------------------
+sync_req(Pid, ReqHdrs, ReqBody) ->
     msg("Sending synchronous request:~nHeaders: ~p~nBody: ~p~n",
         [ReqHdrs, ReqBody]),
 
-    TStart = erlang:system_time(micro_seconds),
-    {ok, {RespHdrs, RespBody}} = h2_client:sync_request(Pid, ReqHdrs, ReqBody),
-    TEnd = erlang:system_time(micro_seconds),
+    {TElapsed, Result} = timer:tc(h2_client, sync_request,
+                                  [Pid, ReqHdrs, ReqBody]),
+    {ok, {RespHdrs, RespBody}} = Result,
 
-    TElapsed = TEnd - TStart,
-    msg("Response time: ~B microseconds~n"
+    msg("~n"
+        "Response time: ~B microseconds~n"
         "Response headers: ~p~n"
         "Response body: ~p~n",
         [TElapsed, RespHdrs, RespBody]),
-
-    RespUUID = sc_util:req_val(<<"apns-id">>, RespHdrs),
-
-    _ = maybe_warn_uuid(ReqUUID, RespUUID),
 
     case sc_util:req_val(<<":status">>, RespHdrs) of
         <<"200">> ->
@@ -270,23 +291,27 @@ get_topic(CertFile) ->
 
 %%--------------------------------------------------------------------
 -spec get_bundle_ids(CertFile) -> Result
-    when CertFile :: string(), Result :: [binary()].
+    when CertFile :: cert_filename(), Result :: [binary()].
 get_bundle_ids(CertFile) ->
     {ok, BCert} = file:read_file(CertFile),
     [get_bundle_id(OTPCert) || OTPCert <- apns_cert:pem_decode_certs(BCert)].
 
 %%--------------------------------------------------------------------
+-spec get_bundle_id(OTPCert) -> Result when
+      OTPCert :: #'OTPCertificate'{}, Result :: binary().
 get_bundle_id(#'OTPCertificate'{} = OTPCert) ->
     bundle_id(apns_cert:get_cert_info(OTPCert)).
 
-bundle_id(#cert_info{bundle_id=BundleID}) ->
-    BundleID.
+-spec bundle_id(CertInfo) -> Result when
+      CertInfo :: term(), Result :: binary().
+bundle_id(CertInfo) ->
+    apns_recs:'#get-cert_info'(bundle_id, CertInfo).
 
 %%--------------------------------------------------------------------
 timestamp_desc(undefined) ->
     undefined;
 timestamp_desc(TS) when is_integer(TS), TS >= 0 ->
-    list_to_binary(posix_ms_to_iso8601(TS)).
+    to_bin(posix_ms_to_iso8601(TS)).
 
 %%--------------------------------------------------------------------
 status_desc(<<"200">>) ->
@@ -311,7 +336,7 @@ status_desc(<<"500">>) ->
 status_desc(<<"503">>) ->
     <<"The server is shutting down and unavailable.">>;
 status_desc(<<B/bytes>>) ->
-    list_to_binary([<<"Unknown status ">>, B]).
+    to_bin([<<"Unknown status ">>, B]).
 
 %%--------------------------------------------------------------------
 reason_desc(<<"PayloadEmpty">>) ->
@@ -393,3 +418,47 @@ now_to_iso8601(Now) ->
     {{Y,Mo,D},{H,M,S}} = calendar:now_to_universal_time(Now),
     io_lib:format("~B-~2..0B-~2..0BT~2..0B:~2..0B:~2..0BZ",
                   [Y, Mo, D, H, M, S]).
+
+%%--------------------------------------------------------------------
+host_info(prod) -> {"api.push.apple.com", 443};
+host_info(dev) ->  {"api.development.push.apple.com", 443}.
+
+%%--------------------------------------------------------------------
+-spec get_apns_conninfo(Env, Opts) -> Result when
+      Env :: apns_env(), Opts :: [{atom(), term()}],
+      Result :: {Host, Port}, Host :: string(), Port :: non_neg_integer().
+get_apns_conninfo(Env, Opts) ->
+    {DefHost, DefPort} = host_info(Env),
+    Host = case string:strip(proplists:get_value(apns_host, Opts, "")) of
+               "" -> DefHost;
+               H  -> H
+           end,
+    {_, Port} = aptest_util:prop(apns_port, Opts, DefPort),
+    {Host, Port}.
+
+%%--------------------------------------------------------------------
+-spec get_cert_env(CertFile) -> Result when
+      CertFile :: cert_filename(), Result :: apns_env() | none().
+get_cert_env(CertFile) ->
+    {ok, B} = file:read_file(CertFile),
+    #{is_development := IsDev,
+      is_production  := IsProd} = aptest_util:get_cert_info(B),
+
+    %% This is not foolproof because VoIP certs are
+    %% usable in both prod and dev, so we let prod take
+    %% precedence.
+    case {IsProd, IsDev} of
+        {true, _} ->
+            prod;
+        {_, true} ->
+            dev;
+        {true, true} ->
+            msg("Warning: ~s is both prod and dev, choosing prod",
+                [CertFile]),
+            prod;
+        {_, _} ->
+            msg("Error! ~s is not a push certificate!", [CertFile]),
+            throw({not_push_cert, CertFile})
+    end.
+
+% ex: set ft=erlang fenc=utf-8 sts=4 ts=4 sw=4 et:

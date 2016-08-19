@@ -1,16 +1,19 @@
 # Summary
 
-This is a simple APNS push token tester. It supports APNS v2 ("enhanced" binary API) and v3 (`HTTP/2`).
+This is a simple APNS push token tester. It supports APNS v2 ("enhanced" binary
+API) and v3 (`HTTP/2`).
 
-You will require the push certificate and the unencrypted push key in PEM format, as well as a valid push token.
-You also need outbound access on port 443 (for `HTTP/2`) or 2195 to Apple's 17.0.0.0 IPv4 address range.
+You will require the push certificate and the unencrypted push key in PEM
+format, as well as a valid push token.  You also need outbound access on port
+443 (for `HTTP/2`) or 2195 to Apple's 17.0.0.0 IPv4 address range.
 
 # Building
 
 * Building requires Erlang 18 and `rebar3`.
 * `rebar3` is automatically downloaded if not present.
 * It has only been built and tested on Debian Jessie.
-* It is not guaranteed to build or work on other platforms, although it probably will if Erlang 18 is installed.
+* It is not guaranteed to build or work on other platforms, although it
+  probably will if Erlang 18 is installed.
 
 ```
 git clone https://github.com/SilentCircle/apns_push_test
@@ -20,14 +23,17 @@ make
 
 # Usage
 
-    Usage: aptest [--send] [--sendfile] [-c [<apns_cert>]] [-e [<apns_env>]]
-                  [-k [<apns_key>]] [-H [<apns_host>]] [-p [<apns_port>]]
-                  [-t [<apns_token>]] [-v [<apns_version>]] [-b [<badge>]]
-                  [-h] [-f [<file>]] [-m <message>] [-r [<raw_json>]]
-                  [-s [<sound>]] [-V [<verbose>]]
+    Usage: aptest [--send] [--sendfile] [--connect] [--showcert]
+                  [-c [<apns_cert>]] [-e [<apns_env>]] [-k [<apns_key>]]
+                  [-H [<apns_host>]] [-p [<apns_port>]] [-t [<apns_token>]]
+                  [-v [<apns_version>]] [-b [<badge>]] [-h] [-f [<file>]]
+                  [-m [<message>]] [-r [<raw_json>]] [-s [<sound>]]
+                  [-V [<verbose>]] [--version]
 
       --send              Send notification
       --sendfile          Send notifications from file
+      --connect           Test connection to APNS
+      --showcert          Show certificate information
       -c, --apns-cert     APNS certificate file [default: ]
       -e, --apns-env      APNS environment (prod|dev) [default: prod]
       -k, --apns-key      APNS private key file [default: ]
@@ -38,10 +44,11 @@ make
       -b, --badge         APNS badge count [-1: unchanged] [default: -1]
       -h, --help          Show help
       -f, --file          File of cert/key/tokens [default: ]
-      -m, --message       APNS alert text
+      -m, --message       APNS alert text [default: ]
       -r, --raw-json      Raw APNS JSON notification [default: ]
-      -s, --sound         APNS sound file name                [default: ]
+      -s, --sound         APNS sound file name [default: ]
       -V, --verbose       Verbose output [default: false]
+      --version           Show aptest version
 
 
 ---
@@ -111,7 +118,6 @@ make
 
 # Issues
 
-* The `--apns-port` option is currently ignored. Ports are chosen based on which APNS version is being used (v2: 2195; v3: 443).
 * It has not been tested with `--raw-json`.
 
 # Other information
