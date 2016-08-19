@@ -27,28 +27,29 @@ make
                   [-c [<apns_cert>]] [-e [<apns_env>]] [-k [<apns_key>]]
                   [-H [<apns_host>]] [-p [<apns_port>]] [-t [<apns_token>]]
                   [-v [<apns_version>]] [-b [<badge>]] [-h] [-f [<file>]]
-                  [-m [<message>]] [-r [<raw_json>]] [-s [<sound>]]
-                  [-V [<verbose>]] [--version]
+                  [-m [<message>]] [-n [<no_check_json>]] [-r [<raw_json>]]
+                  [-s [<sound>]] [-V [<verbose>]] [--version]
 
-      --send              Send notification
-      --sendfile          Send notifications from file
-      --connect           Test connection to APNS
-      --showcert          Show certificate information
-      -c, --apns-cert     APNS certificate file [default: ]
-      -e, --apns-env      APNS environment (prod|dev) [default: prod]
-      -k, --apns-key      APNS private key file [default: ]
-      -H, --apns-host     APNS host (optional) [default: ]
-      -p, --apns-port     APNS port (optional) [default: 2197]
-      -t, --apns-token    APNS hexadecimal token [default: ]
-      -v, --apns-version  APNS protocol version [default: 3]
-      -b, --badge         APNS badge count [-1: unchanged] [default: -1]
-      -h, --help          Show help
-      -f, --file          File of cert/key/tokens [default: ]
-      -m, --message       APNS alert text [default: ]
-      -r, --raw-json      Raw APNS JSON notification [default: ]
-      -s, --sound         APNS sound file name [default: ]
-      -V, --verbose       Verbose output [default: false]
-      --version           Show aptest version
+      --send               Send notification
+      --sendfile           Send notifications from file
+      --connect            Test connection to APNS
+      --showcert           Show certificate information
+      -c, --apns-cert      APNS certificate file [default: ]
+      -e, --apns-env       APNS environment (prod|dev) [default: prod]
+      -k, --apns-key       APNS private key file [default: ]
+      -H, --apns-host      APNS host (optional) [default: ]
+      -p, --apns-port      APNS port (optional) [default: 2197]
+      -t, --apns-token     APNS hexadecimal token [default: ]
+      -v, --apns-version   APNS protocol version [default: 3]
+      -b, --badge          APNS badge count [-1: unchanged] [default: -1]
+      -h, --help           Show help
+      -f, --file           File of cert/key/tokens [default: ]
+      -m, --message        APNS alert text [default: ]
+      -n, --no-check-json  Allow invalid raw JSON [default: false]
+      -r, --raw-json       Raw APNS JSON notification [default: ]
+      -s, --sound          APNS sound file name [default: ]
+      -V, --verbose        Verbose output [default: false]
+      --version            Show aptest version
 
 
 ---

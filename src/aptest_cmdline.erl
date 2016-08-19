@@ -39,6 +39,7 @@ option_spec_list() ->
      {help,            $h,        "help",            undefined,               "Show help"                          },
      {file,            $f,        "file",            {string, ""},            "File of cert/key/tokens"            },
      {message,         $m,        "message",         {string, ""},            "APNS alert text"                    },
+     {no_check_json,   $n,        "no-check-json",   {boolean, false},        "Allow invalid raw JSON"             },
      {raw_json,        $r,        "raw-json",        {string, ""},            "Raw APNS JSON notification"         },
      {sound,           $s,        "sound",           {string, ""},            "APNS sound file name"               },
      {verbose,         $V,        "verbose",         {boolean, false},        "Verbose output"                     },
@@ -223,14 +224,22 @@ raw_json(Opts) ->
                    fun([]) ->
                            true;
                       (V) ->
-                           B = sc_util:to_bin(V),
-                           jsx:is_json(B)
+                           case nocheck_json(Opts) of
+                               false ->
+                                   B = sc_util:to_bin(V),
+                                   jsx:is_json(B);
+                               true ->
+                                   true
+                           end
                    end
            end,
     assert_prop(Pred, raw_json, Opts).
 
 sound(Opts) ->
     assert_prop(fun io_lib:printable_unicode_list/1, sound, Opts).
+
+nocheck_json(Opts) ->
+    proplists:get_value(no_check_json, Opts, false).
 
 verbose(Opts) ->
     lists:foldl(fun({verbose, _} = V, _Acc) -> V;
