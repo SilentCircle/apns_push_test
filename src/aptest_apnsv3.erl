@@ -287,25 +287,10 @@ parse_resp_body([<<RespBody/bytes>>]) ->
 -spec get_topic(CertFile) -> Topic
     when CertFile :: string(), Topic :: binary().
 get_topic(CertFile) ->
-    hd(get_bundle_ids(CertFile)).
-
-%%--------------------------------------------------------------------
--spec get_bundle_ids(CertFile) -> Result
-    when CertFile :: cert_filename(), Result :: [binary()].
-get_bundle_ids(CertFile) ->
     {ok, BCert} = file:read_file(CertFile),
-    [get_bundle_id(OTPCert) || OTPCert <- apns_cert:pem_decode_certs(BCert)].
-
-%%--------------------------------------------------------------------
--spec get_bundle_id(OTPCert) -> Result when
-      OTPCert :: #'OTPCertificate'{}, Result :: binary().
-get_bundle_id(#'OTPCertificate'{} = OTPCert) ->
-    bundle_id(apns_cert:get_cert_info(OTPCert)).
-
--spec bundle_id(CertInfo) -> Result when
-      CertInfo :: term(), Result :: binary().
-bundle_id(CertInfo) ->
-    apns_recs:'#get-cert_info'(bundle_id, CertInfo).
+    DecodedCert = apns_cert:decode_cert(BCert),
+    #{subject_uid := Topic} = apns_cert:get_cert_info_map(DecodedCert),
+    Topic.
 
 %%--------------------------------------------------------------------
 timestamp_desc(undefined) ->
@@ -441,8 +426,9 @@ get_apns_conninfo(Env, Opts) ->
       CertFile :: cert_filename(), Result :: apns_env() | none().
 get_cert_env(CertFile) ->
     {ok, B} = file:read_file(CertFile),
+    DecodedCert = apns_cert:decode_cert(B),
     #{is_development := IsDev,
-      is_production  := IsProd} = aptest_util:get_cert_info(B),
+      is_production  := IsProd} = apns_cert:get_cert_info_map(DecodedCert),
 
     %% This is not foolproof because VoIP certs are
     %% usable in both prod and dev, so we let prod take

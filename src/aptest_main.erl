@@ -216,7 +216,8 @@ show_cert(Config) ->
 
     APNSCert = sc_util:req_val(apns_cert, SSLCfg),
     {ok, Cert} = file:read_file(APNSCert),
-    CertMap = aptest_util:get_cert_info(Cert),
+    DecodedCert = apns_cert:decode_cert(Cert),
+    CertMap = apns_cert:get_cert_info_map(DecodedCert),
     {Pairs, MaxName} = format_cert_info(CertMap),
     Fmt = "~-" ++ integer_to_list(MaxName + 2) ++ "s~s\n",
     _ = [io:format(Fmt, [Name, Val]) || {Name, Val} <- lists:sort(Pairs)],
