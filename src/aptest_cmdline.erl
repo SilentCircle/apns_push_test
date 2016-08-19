@@ -204,14 +204,30 @@ badge(Opts) ->
     Pred = fun(V) -> is_integer_range(V, -1, ?MAX_APNS_BADGE) end,
     assert_prop(Pred, badge, Opts).
 
+%% If raw_json is provided, message must not be provided
 message(Opts) ->
-    Pred = fun(V) -> is_nonempty_string(V) end,
+    Pred = case aptest_util:req_prop(raw_json, Opts) of
+               {_, [_|_]} ->
+                   fun(V) -> V == [] end;
+               _ ->
+                   fun(V) -> is_nonempty_string(V) end
+           end,
     assert_prop(Pred, message, Opts).
 
+%% If raw_json is provided, message must not be provided
 raw_json(Opts) ->
-    assert_prop(fun(<<V/binary>>) -> jsx:is_json(V);
-                   ([])           -> true
-                end, raw_json, Opts).
+    Pred = case aptest_util:req_prop(message, Opts) of
+               {_, [_|_]} ->
+                   fun(V) -> V == [] end;
+               _ ->
+                   fun([]) ->
+                           true;
+                      (V) ->
+                           B = sc_util:to_bin(V),
+                           jsx:is_json(B)
+                   end
+           end,
+    assert_prop(Pred, raw_json, Opts).
 
 sound(Opts) ->
     assert_prop(fun io_lib:printable_unicode_list/1, sound, Opts).

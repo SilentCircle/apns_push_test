@@ -116,10 +116,6 @@ make
 
 ---
 
-# Issues
-
-* It has not been tested with `--raw-json`.
-
 # Other information
 
 ## APNS version 2
