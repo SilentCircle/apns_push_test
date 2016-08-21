@@ -145,17 +145,12 @@ send(Config) ->
     APNSVersion = sc_util:req_val(apns_version, AptestCfg),
     Mod = list_to_atom("aptest_apnsv" ++ integer_to_list(APNSVersion)),
 
-    JSON = case sc_util:req_val(raw_json, AptestCfg) of
-               [] ->
-                    Message = sc_util:req_val(message, AptestCfg),
-                    Badge = sc_util:req_val(badge, AptestCfg),
-                    Sound = sc_util:req_val(sound, AptestCfg),
-                    Notification = make_notification(Message, Badge, Sound),
-                    apns_json:make_notification(Notification);
-               RawJSON ->
-                   sc_util:to_bin(RawJSON)
+    JSON = case sc_util:req_val(no_json, AptestCfg) of
+               true ->
+                   <<>>;
+               false ->
+                   make_json(AptestCfg)
            end,
-
     APNSCert = sc_util:req_val(apns_cert, SSLCfg),
     APNSKey = sc_util:req_val(apns_key, SSLCfg),
     SSLOpts = Mod:make_ssl_opts(APNSCert, APNSKey),
@@ -250,6 +245,19 @@ make_notification(Message, Badge, Sound) ->
     [{alert, list_to_binary(Message)}] ++
     maybe_badge(Badge) ++
     maybe_sound(Sound).
+
+%%--------------------------------------------------------------------
+make_json(AptestCfg) ->
+    case sc_util:req_val(raw_json, AptestCfg) of
+        [] ->
+             Message = sc_util:req_val(message, AptestCfg),
+             Badge = sc_util:req_val(badge, AptestCfg),
+             Sound = sc_util:req_val(sound, AptestCfg),
+             Notification = make_notification(Message, Badge, Sound),
+             apns_json:make_notification(Notification);
+        RawJSON ->
+            sc_util:to_bin(RawJSON)
+    end.
 
 %%--------------------------------------------------------------------
 maybe_badge(N) when is_integer(N), N < 0 ->

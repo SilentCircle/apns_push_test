@@ -40,6 +40,7 @@ option_spec_list() ->
      {file,            $f,        "file",            {string, ""},            "File of cert/key/tokens"            },
      {message,         $m,        "message",         {string, ""},            "APNS alert text"                    },
      {no_check_json,   $n,        "no-check-json",   {boolean, false},        "Allow invalid raw JSON"             },
+     {no_json,         $N,        "no-json",         {boolean, false},        "Omit the APNS payload"              },
      {raw_json,        $r,        "raw-json",        {string, ""},            "Raw APNS JSON notification"         },
      {sound,           $s,        "sound",           {string, ""},            "APNS sound file name"               },
      {verbose,         $V,        "verbose",         {boolean, false},        "Verbose output"                     },
@@ -141,12 +142,12 @@ make_aptest_cfg(action_connect, Opts) ->
 make_aptest_cfg(action_send, Opts) ->
     ValFuns = [fun verbose/1, fun apns_env/1, fun apns_host/1, fun apns_port/1,
                fun apns_version/1, fun apns_token/1, fun badge/1, fun
-               message/1, fun raw_json/1, fun sound/1],
+               message/1, fun raw_json/1, fun no_json/1, fun sound/1],
     lists:foldl(fun(ValFun, Acc) -> [ValFun(Opts)|Acc] end, [], ValFuns);
 make_aptest_cfg(action_sendfile, Opts) ->
     ValFuns = [fun verbose/1, fun apns_env/1, fun apns_host/1, fun apns_port/1,
-               fun file/1, fun badge/1, fun message/1, fun raw_json/1, fun
-               sound/1],
+               fun file/1, fun badge/1, fun message/1, fun raw_json/1, fun no_json/1,
+               fun sound/1],
     lists:foldl(fun(ValFun, Acc) -> [ValFun(Opts)|Acc] end, [], ValFuns);
 make_aptest_cfg(action_showcert, Opts) ->
     ValFuns = [fun verbose/1],
@@ -205,12 +206,20 @@ badge(Opts) ->
     Pred = fun(V) -> is_integer_range(V, -1, ?MAX_APNS_BADGE) end,
     assert_prop(Pred, badge, Opts).
 
-%% If raw_json is provided, message must not be provided
+%% If either raw_json or no_check_json is provided, message must not be
+%% provided
 message(Opts) ->
-    Pred = case aptest_util:req_prop(raw_json, Opts) of
-               {_, [_|_]} ->
+    RawJson = aptest_util:req_prop(raw_json, Opts),
+    NoJson = aptest_util:req_prop(no_json, Opts),
+    MessageMustBeEmpty = case {RawJson, NoJson} of
+                             {{_, [_|_]}, _} -> true;
+                             {_, {_, true}} -> true;
+                             _ -> false
+                         end,
+    Pred = case MessageMustBeEmpty of
+               true ->
                    fun(V) -> V == [] end;
-               _ ->
+               false ->
                    fun(V) -> is_nonempty_string(V) end
            end,
     assert_prop(Pred, message, Opts).
@@ -240,6 +249,9 @@ sound(Opts) ->
 
 nocheck_json(Opts) ->
     proplists:get_value(no_check_json, Opts, false).
+
+no_json(Opts) ->
+    assert_prop(fun(_) -> true end, no_json, Opts).
 
 verbose(Opts) ->
     lists:foldl(fun({verbose, _} = V, _Acc) -> V;
