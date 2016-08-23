@@ -3,7 +3,7 @@
          connect/2,
          send/4,
          format_apns_error/1,
-         make_ssl_opts/2
+         make_ssl_opts/1
         ]).
 
 -import(aptest_util, [msg/2, msg/3, err_msg/2, err_msg/3]).
@@ -71,9 +71,19 @@ format_apns_error(R) ->
                   [Id, S, SC, SD]).
 
 %%--------------------------------------------------------------------
-make_ssl_opts(APNSCert, APNSKey) ->
+-spec make_ssl_opts([{atom(), string()}]) -> [{atom(), term()}].
+make_ssl_opts(SSLCfg) ->
+    APNSCert = sc_util:req_val(apns_cert, SSLCfg),
+    APNSKey = sc_util:req_val(apns_key, SSLCfg),
+    APNSCACert = case sc_util:req_val(apns_ca_cert, SSLCfg) of
+                     [] ->
+                         "/etc/ssl/certs/ca-certificates.crt";
+                     CAFile ->
+                        CAFile
+                 end,
     [
      {certfile, APNSCert},
+     {cacertfile, APNSCACert},
      {keyfile, APNSKey},
      {versions, ['tlsv1']} % Fix for SSL issue http://erlang.org/pipermail/erlang-questions/2015-June/084935.html
     ].

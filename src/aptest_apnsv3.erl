@@ -3,7 +3,7 @@
          send/4,
          send_file/2,
          format_apns_error/1,
-         make_ssl_opts/2
+         make_ssl_opts/1
         ]).
 
 -import(aptest_util, [msg/2]).
@@ -47,8 +47,14 @@ start_client(Host, Port, SSLOpts) ->
     msg("Connecting with HTTP/2 to ~s:~B~n", [Host, Port]),
     {T, Result} = timer:tc(h2_client, start_link,
                            [https, Host, Port, SSLOpts]),
-    msg("Connected in ~B microseconds.~n", [T]),
-    Result.
+    case Result of
+        {ok, _} ->
+            msg("Connected in ~B microseconds.~n", [T]),
+            Result;
+        {error, {{badmatch, Error}, _StackTrace}} ->
+            SslError = ssl:format_error(Error),
+            {error, {connection_error, SslError}}
+    end.
 
 %%--------------------------------------------------------------------
 -spec stop_client(Pid) -> ok when Pid :: pid().
@@ -65,7 +71,7 @@ connect(Opts, Env) when Env =:= prod; Env =:= dev ->
         {ok, Pid} ->
             msg("Connected ok, disconnecting.~n", []),
             _ = stop_client(Pid);
-        Error ->
+        {error, _Reason} = Error ->
             Error
     end.
 
@@ -82,10 +88,13 @@ send(Token, JSON, Opts, Env) when Env =:= prod; Env =:= dev ->
         {ok, Pid} ->
             try
                 send_impl(Pid, Token, Topic, JSON)
+            catch
+                _:Reason ->
+                    Reason
             after
                 _ = stop_client(Pid)
             end;
-        Error ->
+        {error, _Reason} = Error ->
             Error
     end.
 
@@ -96,19 +105,25 @@ send(Token, JSON, Opts, Env) when Env =:= prod; Env =:= dev ->
 send_file(Filename, JSON) ->
     {ok, B} = file:read_file(Filename),
     Conns = parse_conninfo(B),
-    [{{Cert, Key}, send_mult(Cert, Key, JSON, Tokens)}
+    SSLCfg = fun(ACert, AKey) -> [
+                                  {apns_cert, ACert},
+                                  {apns_key, AKey}
+                                 ]
+             end,
+    [{{Cert, Key}, send_mult(SSLCfg(Cert, Key), JSON, Tokens)}
      || {{Cert, Key}, Tokens} <- validate_conninfo(Conns)].
 
 %%--------------------------------------------------------------------
--spec send_mult(APNSCert, APNSKey, JSON, Tokens) -> Results
-    when APNSCert :: cert_filename(), APNSKey :: key_filename(),
+-spec send_mult(SSLCfg, JSON, Tokens) -> Results
+    when SSLCfg :: [{atom(), string()}],
          JSON :: json(), Tokens :: tokens(),
          Results :: send_mult_results().
-send_mult(APNSCert, APNSKey, JSON, Tokens) ->
+send_mult(SSLCfg, JSON, Tokens) ->
+    APNSCert = sc_util:req_val(certfile, SSLCfg),
     Env = get_cert_env(APNSCert),
     {Host, Port} = host_info(Env),
     Topic = get_topic(APNSCert),
-    SSLOpts = make_ssl_opts(APNSCert, APNSKey),
+    SSLOpts = make_ssl_opts(SSLCfg),
     Wrap = fun(ok, Tok) ->
                    {ok, Tok};
               ({error, Err}, Tok) ->
@@ -124,7 +139,7 @@ send_mult(APNSCert, APNSKey, JSON, Tokens) ->
                 _ = stop_client(Pid),
                 msg("Disconnected.~n", [])
             end;
-        Error ->
+        {error, _Reason} = Error ->
             Error
     end.
 
@@ -383,13 +398,23 @@ reason_desc(<<Other/bytes>>) ->
     Other.
 
 %%--------------------------------------------------------------------
--spec make_ssl_opts(string(), string()) -> [{atom(), term()}].
-make_ssl_opts(APNSCert, APNSKey) ->
+-spec make_ssl_opts([{atom(), string()}]) -> [{atom(), term()}].
+make_ssl_opts(SSLCfg) ->
+    APNSCert = sc_util:req_val(apns_cert, SSLCfg),
+    APNSKey = sc_util:req_val(apns_key, SSLCfg),
+    APNSCACert = case sc_util:val(apns_ca_cert, SSLCfg, []) of
+                     [] ->
+                         "/etc/ssl/certs/ca-certificates.crt";
+                     CAFile ->
+                        CAFile
+                 end,
     [{certfile, APNSCert},
      {keyfile, APNSKey},
+     {cacertfile, APNSCACert},
+     {verify, verify_peer},
      {honor_cipher_order, false},
      {versions, ['tlsv1.2']},
-     {alpn_preferred_protocols, [<<"h2">>]}].
+     {alpn_advertised_protocols, [<<"h2">>]}].
 
 %%--------------------------------------------------------------------
 posix_ms_to_iso8601(TS) ->

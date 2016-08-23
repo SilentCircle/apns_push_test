@@ -29,6 +29,7 @@ option_spec_list() ->
      {action_connect,  undefined, "connect",         undefined,               "Test connection to APNS"            },
      {action_showcert, undefined, "showcert",        undefined,               "Show certificate information"       },
      {apns_cert,       $c,        "apns-cert",       {string, ""},            "APNS certificate file"              },
+     {apns_ca_cert,    $A,        "apns-ca-cert",    {string, ""},            "APNS CA chain certificate file"     },
      {apns_env,        $e,        "apns-env",        {atom, prod},            "APNS environment (prod|dev)"        },
      {apns_key,        $k,        "apns-key",        {string, ""},            "APNS private key file"              },
      {apns_host,       $H,        "apns-host",       {string, ""},            "APNS host (optional)"               },
@@ -156,11 +157,13 @@ make_aptest_cfg(action_showcert, Opts) ->
 make_ssl_cfg(action_connect, Opts) ->
     [
         apns_cert(Opts),
+        apns_ca_cert(Opts),
         apns_key(Opts)
     ];
 make_ssl_cfg(action_send, Opts) ->
     [
         apns_cert(Opts),
+        apns_ca_cert(Opts),
         apns_key(Opts)
     ];
 make_ssl_cfg(action_sendfile, _Opts) ->
@@ -173,6 +176,12 @@ make_ssl_cfg(action_showcert, Opts) ->
 apns_cert(Opts) ->
     Pred = fun(V) -> is_list(V) andalso filelib:is_regular(V) end,
     assert_prop(Pred, apns_cert, Opts).
+
+apns_ca_cert(Opts) ->
+    Pred = fun([]) -> true;
+              (V) -> is_list(V) andalso filelib:is_regular(V)
+           end,
+    assert_prop(Pred, apns_ca_cert, Opts).
 
 apns_env(Opts) ->
     Pred = fun(V) -> V =:= prod orelse V =:= dev end,

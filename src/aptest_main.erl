@@ -121,9 +121,7 @@ connect(Config) ->
     APNSVersion = sc_util:req_val(apns_version, AptestCfg),
     Mod = list_to_atom("aptest_apnsv" ++ integer_to_list(APNSVersion)),
 
-    APNSCert = sc_util:req_val(apns_cert, SSLCfg),
-    APNSKey = sc_util:req_val(apns_key, SSLCfg),
-    SSLOpts = Mod:make_ssl_opts(APNSCert, APNSKey),
+    SSLOpts = Mod:make_ssl_opts(SSLCfg),
     APNSEnv = sc_util:req_val(apns_env, AptestCfg),
     Opts = [{ssl_opts, SSLOpts} | AptestCfg],
 
@@ -151,9 +149,7 @@ send(Config) ->
                false ->
                    make_json(AptestCfg)
            end,
-    APNSCert = sc_util:req_val(apns_cert, SSLCfg),
-    APNSKey = sc_util:req_val(apns_key, SSLCfg),
-    SSLOpts = Mod:make_ssl_opts(APNSCert, APNSKey),
+    SSLOpts = Mod:make_ssl_opts(SSLCfg),
     Opts = [{ssl_opts, SSLOpts} | AptestCfg],
 
     Token = sc_util:to_bin(sc_util:req_val(apns_token, AptestCfg)),
@@ -163,7 +159,7 @@ send(Config) ->
         ok ->
             msg("Pushed without receiving APNS error!~n", []),
             0;
-        {error, AE} ->
+        {error, {[{_,_}|_] = _Hdrs, <<_Body/binary>>}=AE} ->
             err_msg("APNS error:~n~s~n", [Mod:format_apns_error(AE)]),
             1;
         Error ->

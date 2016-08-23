@@ -24,18 +24,19 @@ make
 # Usage
 
 Usage: aptest [--send] [--sendfile] [--connect] [--showcert]
-              [-c [<apns_cert>]] [-e [<apns_env>]] [-k [<apns_key>]]
-              [-H [<apns_host>]] [-p [<apns_port>]] [-t [<apns_token>]]
-              [-v [<apns_version>]] [-b [<badge>]] [-h] [-f [<file>]]
-              [-m [<message>]] [-n [<no_check_json>]] [-N [<no_json>]]
-              [-r [<raw_json>]] [-s [<sound>]] [-V [<verbose>]]
-              [--version]
+              [-c [<apns_cert>]] [-A [<apns_ca_cert>]] [-e [<apns_env>]]
+              [-k [<apns_key>]] [-H [<apns_host>]] [-p [<apns_port>]]
+              [-t [<apns_token>]] [-v [<apns_version>]] [-b [<badge>]]
+              [-h] [-f [<file>]] [-m [<message>]] [-n [<no_check_json>]]
+              [-N [<no_json>]] [-r [<raw_json>]] [-s [<sound>]]
+              [-V [<verbose>]] [--version]
 
   --send               Send notification
   --sendfile           Send notifications from file
   --connect            Test connection to APNS
   --showcert           Show certificate information
   -c, --apns-cert      APNS certificate file [default: ]
+  -A, --apns-ca-cert   APNS CA chain certificate file [default: ]
   -e, --apns-env       APNS environment (prod|dev) [default: prod]
   -k, --apns-key       APNS private key file [default: ]
   -H, --apns-host      APNS host (optional) [default: ]
@@ -52,7 +53,6 @@ Usage: aptest [--send] [--sendfile] [--connect] [--showcert]
   -s, --sound          APNS sound file name [default: ]
   -V, --verbose        Verbose output [default: false]
   --version            Show aptest version
-
 
 ---
 
