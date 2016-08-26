@@ -195,7 +195,7 @@ send_file(Config) ->
     %% Results :: list(CertKeyResult),
     %% CertKeyResult :: {{CertFilename,KeyFilename}, [Result]}
     _ = [handle_sendfile_result(Result, Mod)
-         || Result <- Mod:send_file(Filename, JSON)],
+         || Result <- Mod:send_file(AptestCfg, Filename, JSON)],
     0
     .
 
@@ -272,10 +272,19 @@ maybe_sound(Sound) ->
       CertInfo :: map(), Result :: {[{binary(), binary()}], integer()}.
 format_cert_info(#{} = CertInfo) ->
     lists:foldl(
-      fun({Name, Val}, {L, Max}) ->
+      fun({topics, [_|_] = Topics}, {L, Max}) ->
+              BName = <<"topics">>,
+              BVal = format_topics(Topics),
+              {[{BName, BVal}|L], max(Max, byte_size(BName))};
+        ({Name, Val}, {L, Max}) ->
               BName = sc_util:to_bin(Name),
               BVal = sc_util:to_bin(Val),
               {[{BName, BVal}|L], max(Max, byte_size(BName))}
       end, {[], 0}, maps:to_list(CertInfo)).
+
+format_topics(Topics) ->
+    list_to_binary(lists:foldl(fun({K, V}, Acc) ->
+                                       [[K, $:, $\s, V, $;, $\s]|Acc]
+                               end, [], Topics)).
 
 % ex: set ft=erlang fenc=utf-8 sts=4 ts=4 sw=4 et:

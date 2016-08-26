@@ -13,6 +13,8 @@
 
 -export_type([action/0, config/0]).
 
+-define(UUID_RE, "^[[:xdigit:]]{8}(?:-[[:xdigit:]]{4}){3}-[[:xdigit:]]{12}$").
+
 -include_lib("kernel/include/inet.hrl").
 -include("aptest.hrl").
 
@@ -31,10 +33,14 @@ option_spec_list() ->
      {apns_cert,       $c,        "apns-cert",       {string, ""},            "APNS certificate file"              },
      {apns_ca_cert,    $A,        "apns-ca-cert",    {string, ""},            "APNS CA chain certificate file"     },
      {apns_env,        $e,        "apns-env",        {atom, prod},            "APNS environment (prod|dev)"        },
+     {apns_expiration, $x,        "apns-expiration", {integer, -1},           "APNS expiration time (optional)"    },
      {apns_key,        $k,        "apns-key",        {string, ""},            "APNS private key file"              },
      {apns_host,       $H,        "apns-host",       {string, ""},            "APNS host (optional)"               },
+     {apns_id,         $i,        "apns-id",         {string, ""},            "APNS uuid (optional)"               },
      {apns_port,       $p,        "apns-port",       {integer, 2197},         "APNS port (optional)"               },
+     {apns_priority,   $P,        "apns-priority",   {integer, -1},           "APNS priority (optional)"           },
      {apns_token,      $t,        "apns-token",      {string, ""},            "APNS hexadecimal token"             },
+     {apns_topic,      $T,        "apns-topic",      {string, ""},            "APNS topic (defaults to cert topic)"},
      {apns_version,    $v,        "apns-version",    {integer,  3},           "APNS protocol version"              },
      {badge,           $b,        "badge",           {integer, -1},           "APNS badge count [-1: unchanged]"   },
      {help,            $h,        "help",            undefined,               "Show help"                          },
@@ -137,17 +143,39 @@ get_action(Opts) ->
     end.
 
 make_aptest_cfg(action_connect, Opts) ->
-    ValFuns = [fun verbose/1, fun apns_env/1, fun apns_host/1, fun apns_port/1,
+    ValFuns = [fun verbose/1,
+               fun apns_env/1,
+               fun apns_host/1,
+               fun apns_port/1,
                fun apns_version/1],
     lists:foldl(fun(ValFun, Acc) -> [ValFun(Opts)|Acc] end, [], ValFuns);
 make_aptest_cfg(action_send, Opts) ->
-    ValFuns = [fun verbose/1, fun apns_env/1, fun apns_host/1, fun apns_port/1,
-               fun apns_version/1, fun apns_token/1, fun badge/1, fun
-               message/1, fun raw_json/1, fun no_json/1, fun sound/1],
+    ValFuns = [fun apns_env/1,
+               fun apns_expiration/1,
+               fun apns_host/1,
+               fun apns_id/1,
+               fun apns_port/1,
+               fun apns_priority/1,
+               fun apns_token/1,
+               fun apns_topic/1,
+               fun apns_version/1,
+               fun badge/1,
+               fun message/1,
+               fun no_json/1,
+               fun raw_json/1,
+               fun sound/1,
+               fun verbose/1],
     lists:foldl(fun(ValFun, Acc) -> [ValFun(Opts)|Acc] end, [], ValFuns);
 make_aptest_cfg(action_sendfile, Opts) ->
-    ValFuns = [fun verbose/1, fun apns_env/1, fun apns_host/1, fun apns_port/1,
-               fun file/1, fun badge/1, fun message/1, fun raw_json/1, fun no_json/1,
+    ValFuns = [fun verbose/1,
+               fun apns_env/1,
+               fun apns_host/1,
+               fun apns_port/1,
+               fun file/1,
+               fun badge/1,
+               fun message/1,
+               fun raw_json/1,
+               fun no_json/1,
                fun sound/1],
     lists:foldl(fun(ValFun, Acc) -> [ValFun(Opts)|Acc] end, [], ValFuns);
 make_aptest_cfg(action_showcert, Opts) ->
@@ -183,9 +211,25 @@ apns_ca_cert(Opts) ->
            end,
     assert_prop(Pred, apns_ca_cert, Opts).
 
+apns_expiration(Opts) ->
+    IsStrict = proplists:get_value(strict, Opts, false),
+    Pred = fun(V) ->
+                   IsStrict andalso is_integer_range(V, -1, 16#FFFFFFFF)
+                   orelse true
+           end,
+    assert_prop(Pred, apns_expiration, Opts).
+
 apns_env(Opts) ->
     Pred = fun(V) -> V =:= prod orelse V =:= dev end,
     assert_prop(Pred, apns_env, Opts).
+
+apns_id(Opts) ->
+    IsStrict = proplists:get_value(strict, Opts, false),
+    Pred = fun([]) -> true;
+              (V)  -> IsStrict andalso is_uuid(V)
+                      orelse true
+           end,
+    assert_prop(Pred, apns_id, Opts).
 
 apns_key(Opts) ->
     Pred = fun(V) -> is_list(V) andalso filelib:is_regular(V) end,
@@ -198,6 +242,14 @@ apns_host(Opts) ->
 apns_port(Opts) ->
     Pred = fun(V) -> is_pos_integer_range(V, 16#FFFF) end,
     assert_prop(Pred, apns_port, Opts).
+
+apns_priority(Opts) ->
+    IsStrict = proplists:get_value(strict, Opts, false),
+    Pred = fun(V) when is_integer(V) ->
+                   IsStrict andalso (V == -1 orelse V == 5 orelse V == 10)
+                   orelse true
+           end,
+    assert_prop(Pred, apns_priority, Opts).
 
 apns_token(Opts) ->
     Pred = fun(V) -> is_nonempty_string(V) end,
@@ -214,6 +266,10 @@ file(Opts) ->
 badge(Opts) ->
     Pred = fun(V) -> is_integer_range(V, -1, ?MAX_APNS_BADGE) end,
     assert_prop(Pred, badge, Opts).
+
+apns_topic(Opts) ->
+    Pred = fun(V) -> is_string(V) end,
+    assert_prop(Pred, apns_topic, Opts).
 
 %% If either raw_json or no_check_json is provided, message must not be
 %% provided
@@ -311,6 +367,12 @@ is_integer_range(X, Min, Max) ->
     when X :: term(), Max :: pos_integer().
 is_pos_integer_range(X, Max) ->
     is_integer_range(X, 1, Max).
+
+-spec is_uuid(X) -> boolean() when
+      X :: term().
+is_uuid(X) ->
+    is_nonempty_string(X) andalso % 8-4-4-4-12
+    match == re:run(X, ?UUID_RE, [{capture, none}]).
 
 -spec wrap_result(OptSpecList, Result) -> WrappedResult when
       OptSpecList :: opt_specs(), Result :: OkResult | {error, term()},

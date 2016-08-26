@@ -1,7 +1,7 @@
 -module(aptest_apnsv3).
 -export([
          send/4,
-         send_file/2,
+         send_file/3,
          format_apns_error/1,
          make_ssl_opts/1
         ]).
@@ -16,7 +16,6 @@
 %%%-------------------------------------------------------------------
 -type apns_env() :: prod | dev.
 -type json() :: binary().
--type topic() :: binary().
 -type token() :: binary().
 -type tokens() :: [token()].
 -type cert_filename() :: string().
@@ -80,14 +79,12 @@ connect(Opts, Env) when Env =:= prod; Env =:= dev ->
       Token :: token(), JSON :: json(), Opts :: list(),
       Env :: apns_env(), Result :: send_result().
 send(Token, JSON, Opts, Env) when Env =:= prod; Env =:= dev ->
-    SSLOpts = sc_util:req_val(ssl_opts, Opts),
-    APNSCert = sc_util:req_val(certfile, SSLOpts),
-    Topic = get_topic(APNSCert),
     {Host, Port} = get_apns_conninfo(Env, Opts),
+    SSLOpts = sc_util:req_val(ssl_opts, Opts),
     case start_client(Host, Port, SSLOpts) of
         {ok, Pid} ->
             try
-                send_impl(Pid, Token, Topic, JSON)
+                send_impl(Pid, Token, JSON, Opts)
             catch
                 _:Reason ->
                     Reason
@@ -99,30 +96,33 @@ send(Token, JSON, Opts, Env) when Env =:= prod; Env =:= dev ->
     end.
 
 %%--------------------------------------------------------------------
--spec send_file(Filename, JSON) -> Results
-    when Filename :: string(), JSON :: json(),
+-spec send_file(Opts, Filename, JSON) -> Results
+    when Filename :: string(), JSON :: json(), Opts :: [{_,_}],
          Results :: [send_file_result()].
-send_file(Filename, JSON) ->
+send_file(Opts, Filename, JSON) ->
     {ok, B} = file:read_file(Filename),
     Conns = parse_conninfo(B),
-    SSLCfg = fun(ACert, AKey) -> [
-                                  {apns_cert, ACert},
-                                  {apns_key, AKey}
-                                 ]
+    MkOpts = fun(ACert, AKey) ->
+                     SslOpts = {ssl_opts, [
+                                           {apns_cert, ACert},
+                                           {apns_key, AKey}
+                                          ]},
+                     lists:keystore(ssl_opts, 1, Opts, SslOpts)
              end,
-    [{{Cert, Key}, send_mult(SSLCfg(Cert, Key), JSON, Tokens)}
+    [{{Cert, Key}, send_mult(MkOpts(Cert, Key), JSON, Tokens)}
      || {{Cert, Key}, Tokens} <- validate_conninfo(Conns)].
 
 %%--------------------------------------------------------------------
--spec send_mult(SSLCfg, JSON, Tokens) -> Results
-    when SSLCfg :: [{atom(), string()}],
+-spec send_mult(Opts, JSON, Tokens) -> Results
+    when Opts :: [{atom(), string()}],
          JSON :: json(), Tokens :: tokens(),
          Results :: send_mult_results().
-send_mult(SSLCfg, JSON, Tokens) ->
+send_mult(Opts, JSON, Tokens) ->
+    SSLCfg = sc_util:req_val(ssl_opts, Opts),
     APNSCert = sc_util:req_val(certfile, SSLCfg),
     Env = get_cert_env(APNSCert),
     {Host, Port} = host_info(Env),
-    Topic = get_topic(APNSCert),
+    Topic = get_topic(Opts),
     SSLOpts = make_ssl_opts(SSLCfg),
     Wrap = fun(ok, Tok) ->
                    {ok, Tok};
@@ -144,21 +144,44 @@ send_mult(SSLCfg, JSON, Tokens) ->
     end.
 
 %%--------------------------------------------------------------------
--spec send_impl(Pid, Token, Topic, JSON) -> Result when
-      Pid :: pid(), Token :: token(), Topic :: topic(), JSON :: json(),
+-spec send_impl(Pid, Token, JSON, Opts) -> Result when
+      Pid :: pid(), Token :: token(), JSON :: json(), Opts :: [{_,_}],
       Result :: send_result().
-send_impl(Pid, Token, Topic, JSON) ->
+send_impl(Pid, Token, JSON, Opts) ->
+    % ReqUUID = to_bin(uuid:uuid_to_string(uuid:get_v4())),
     HTTPPath = to_bin([<<"/3/device/">>, Token]),
-    ReqUUID = to_bin(uuid:uuid_to_string(uuid:get_v4())),
+    % Topic = get_topic(Opts),
     ReqHdrs = [{<<":method">>, <<"POST">>},
                {<<":path">>, HTTPPath},
-               {<<":scheme">>, <<"https">>},
-               {<<"apns-id">>, ReqUUID},
-               {<<"apns-topic">>, Topic}
-              ],
+               {<<":scheme">>, <<"https">>}
+              ] ++ maybe_prop(apns_id, Opts)
+                ++ maybe_prop(apns_topic, Opts)
+                ++ maybe_prop(apns_expiration, Opts)
+                ++ maybe_prop(apns_priority, Opts),
 
     ReqBody = JSON,
     sync_req(Pid, ReqHdrs, ReqBody).
+
+%%--------------------------------------------------------------------
+maybe_prop(Name, PL) ->
+    case proplists:get_value(Name, PL) of
+        undefined ->
+            [];
+        [] ->
+            [];
+        <<>> ->
+            [];
+        -1 ->
+            [];
+        Value ->
+            [{atom_to_dash_binary(Name), to_bin(Value)}]
+    end.
+
+%%--------------------------------------------------------------------
+%% this_is_a_key -> <<"this-is-a-key">>
+atom_to_dash_binary(X) when is_atom(X) ->
+    S = atom_to_list(X),
+    to_bin(string:join(string:tokens(S, "_"), "-")).
 
 %%--------------------------------------------------------------------
 sync_req(Pid, ReqHdrs, ReqBody) ->
@@ -299,13 +322,20 @@ parse_resp_body([<<RespBody/bytes>>]) ->
 
 
 %%--------------------------------------------------------------------
--spec get_topic(CertFile) -> Topic
-    when CertFile :: string(), Topic :: binary().
-get_topic(CertFile) ->
-    {ok, BCert} = file:read_file(CertFile),
-    DecodedCert = apns_cert:decode_cert(BCert),
-    #{subject_uid := Topic} = apns_cert:get_cert_info_map(DecodedCert),
-    Topic.
+-spec get_topic(Opts) -> Topic
+    when Opts :: list(), Topic :: binary().
+get_topic(Opts) ->
+    case sc_util:req_val(topic, Opts) of
+        [] ->
+            SSLOpts = sc_util:req_val(ssl_opts, Opts),
+            CertFile = sc_util:req_val(certfile, SSLOpts),
+            {ok, BCert} = file:read_file(CertFile),
+            DecodedCert = apns_cert:decode_cert(BCert),
+            #{subject_uid := Topic} = apns_cert:get_cert_info_map(DecodedCert),
+            Topic;
+        UserTopic ->
+            list_to_binary(UserTopic)
+    end.
 
 %%--------------------------------------------------------------------
 timestamp_desc(undefined) ->

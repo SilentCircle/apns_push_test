@@ -44,9 +44,12 @@ send(Token, JSON, Opts, Env) when Env =:= prod; Env =:= dev ->
     BToken = sc_util:hex_to_bitstring(Token),
     {Host, Port} = host_info(Env),
     SSLOpts = sc_util:req_val(ssl_opts, Opts),
+    Id = sc_util:val(apns_int_id, Opts, 1),
+    Exp = sc_util:val(apns_expiration, Opts, 16#FFFFFFFF),
+    Prio = sc_util:val(apns_priority, Opts, 10),
     {ok, Sock} = start_client(Host, Port, SSLOpts),
     try
-        Packet = apns_lib:encode_v2(1, 16#FFFFFFFF, BToken, JSON, 10),
+        Packet = apns_lib:encode_v2(Id, Exp, BToken, JSON, Prio),
         check_packet(Packet),
         msg("Sending APNS v2 packet:~n", []),
         aptest_util:hexdump(Packet),
