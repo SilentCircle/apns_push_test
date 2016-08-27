@@ -6,7 +6,7 @@
          make_ssl_opts/1
         ]).
 
--import(aptest_util, [msg/2]).
+-import(aptest_util, [msg/2, err_msg/2]).
 -import(sc_util, [to_bin/1, to_list/1]).
 
 -include_lib("public_key/include/public_key.hrl").
@@ -44,15 +44,22 @@
       SSLOpts :: [term()], Result :: {ok, pid()} | {error, term()}.
 start_client(Host, Port, SSLOpts) ->
     msg("Connecting with HTTP/2 to ~s:~B~n", [Host, Port]),
-    {T, Result} = timer:tc(h2_client, start_link,
-                           [https, Host, Port, SSLOpts]),
-    case Result of
-        {ok, _} ->
+    msg("SSL Opts: ~p~n", [SSLOpts]),
+    OldTrap = process_flag(trap_exit, true),
+    try timer:tc(h2_client, start_link, [https, Host, Port, SSLOpts]) of
+        {T, {ok, _}=Result} ->
             msg("Connected in ~B microseconds.~n", [T]),
             Result;
-        {error, {{badmatch, Error}, _StackTrace}} ->
+        {_, {error, {{badmatch, Error}, _StackTrace}}} ->
             SslError = ssl:format_error(Error),
             {error, {connection_error, SslError}}
+    catch
+        Class:Reason ->
+            err_msg("[~p:~p] Exception, class: ~p, reason: ~p~n",
+                    [Class, Reason]),
+            Reason
+    after
+        process_flag(trap_exit, OldTrap)
     end.
 
 %%--------------------------------------------------------------------

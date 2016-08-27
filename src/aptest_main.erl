@@ -155,15 +155,22 @@ send(Config) ->
     Token = sc_util:to_bin(sc_util:req_val(apns_token, AptestCfg)),
     APNSEnv = sc_util:req_val(apns_env, AptestCfg),
 
-    case Mod:send(Token, JSON, Opts, APNSEnv) of
+    try Mod:send(Token, JSON, Opts, APNSEnv) of
         ok ->
             msg("Pushed without receiving APNS error!~n", []),
             0;
         {error, {[{_,_}|_] = _Hdrs, <<_Body/binary>>}=AE} ->
             err_msg("APNS error:~n~s~n", [Mod:format_apns_error(AE)]),
             1;
+        {error, {connection_error, ErrorText}} ->
+            err_msg("Connection error: ~s~n", [ErrorText]),
+            2;
         Error ->
             err_msg("Error:~n~p~n", [Error]),
+            2
+    catch
+        _:{error, {tls_alert, TlsError}} ->
+            err_msg("TLS error: ~s~n", [TlsError]),
             2
     end.
 

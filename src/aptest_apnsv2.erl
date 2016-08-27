@@ -9,15 +9,26 @@
 -import(aptest_util, [msg/2, msg/3, err_msg/2, err_msg/3]).
 
 %%--------------------------------------------------------------------
+-spec start_client(Host, Port, SSLOpts) -> Result when
+      Host :: string(), Port :: non_neg_integer(),
+      SSLOpts :: [term()], Result :: {ok, pid()} | {error, term()}.
 start_client(Host, Port, SSLOpts) ->
     msg("Connecting over TLS to ~s:~B~n", [Host, Port]),
+    msg("SSL Opts: ~p~n", [SSLOpts]),
     {T, Result} = timer:tc(ssl, connect, [Host, Port, SSLOpts]),
-    msg("Connected in ~B microseconds.~n", [T]),
-    Result.
+    case Result of
+        {ok, _Sock} ->
+            msg("Connected in ~B microseconds.~n", [T]),
+            Result;
+        {error, {tls_alert, TlsAlert}} ->
+            {error, {connection_error, "TLS Alert: " ++ TlsAlert}};
+        {error, _Error} ->
+            Result
+    end.
 
 %%--------------------------------------------------------------------
 stop_client(Sock) ->
-    ssl:close(Sock).
+    _ = ssl:close(Sock).
 
 %%--------------------------------------------------------------------
 -spec connect(Opts, Env) -> Result
@@ -47,7 +58,17 @@ send(Token, JSON, Opts, Env) when Env =:= prod; Env =:= dev ->
     Id = sc_util:val(apns_int_id, Opts, 1),
     Exp = sc_util:val(apns_expiration, Opts, 16#FFFFFFFF),
     Prio = sc_util:val(apns_priority, Opts, 10),
-    {ok, Sock} = start_client(Host, Port, SSLOpts),
+
+    case start_client(Host, Port, SSLOpts) of
+        {ok, Sock} ->
+            send_impl(Sock, Id, Exp, BToken, JSON, Prio);
+        {error, _Reason} = Error ->
+            Error
+    end.
+
+
+%%--------------------------------------------------------------------
+send_impl(Sock, Id, Exp, BToken, JSON, Prio) ->
     try
         Packet = apns_lib:encode_v2(Id, Exp, BToken, JSON, Prio),
         check_packet(Packet),
@@ -62,7 +83,7 @@ send(Token, JSON, Opts, Env) when Env =:= prod; Env =:= dev ->
                 Error
         end
     after
-        stop_client(Sock)
+        _ = stop_client(Sock)
     end.
 
 %%--------------------------------------------------------------------
