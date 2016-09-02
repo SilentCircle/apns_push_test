@@ -155,9 +155,7 @@ send_mult(Opts, JSON, Tokens) ->
       Pid :: pid(), Token :: token(), JSON :: json(), Opts :: [{_,_}],
       Result :: send_result().
 send_impl(Pid, Token, JSON, Opts) ->
-    % ReqUUID = to_bin(uuid:uuid_to_string(uuid:get_v4())),
     HTTPPath = to_bin([<<"/3/device/">>, Token]),
-    % Topic = get_topic(Opts),
     ReqHdrs = [{<<":method">>, <<"POST">>},
                {<<":path">>, HTTPPath},
                {<<":scheme">>, <<"https">>}
