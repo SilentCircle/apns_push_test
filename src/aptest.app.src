@@ -1,7 +1,7 @@
 {application, aptest,
  [
-  {description, "Simple APNS Push Tester"},
-  {vsn, "0.9.2"},
+  {description, "APNS Push Test Utility"},
+  {vsn, "0.9.3"},
   {modules, [
         aptest_app,
         aptest_apnsv2,

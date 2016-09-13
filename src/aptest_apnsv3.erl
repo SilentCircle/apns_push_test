@@ -16,6 +16,7 @@
 %%%-------------------------------------------------------------------
 -type apns_env() :: prod | dev.
 -type json() :: binary().
+-type topic() :: binary().
 -type token() :: binary().
 -type tokens() :: [token()].
 -type cert_filename() :: string().
@@ -33,6 +34,16 @@
                           | {error, {http2_resp(), token()}}.
 -type send_mult_results() :: [send_mult_result()].
 -type send_file_result() :: {apns_cert_files(), send_mult_results()}.
+
+-type ssl_cfg_key() :: apns_cert
+                     | apns_key
+                     | apns_ca_cert.
+-type ssl_cfg_item() :: {ssl_cfg_key(), string()}.
+-type ssl_cfg() :: [ssl_cfg_item()].
+
+-type ssl_opts() :: [ssl:ssl_option()].
+
+-type cmdline_opts() :: aptest_cmdline:config().
 
 %%%-------------------------------------------------------------------
 %%% API
@@ -103,33 +114,30 @@ send(Token, JSON, Opts, Env) when Env =:= prod; Env =:= dev ->
     end.
 
 %%--------------------------------------------------------------------
--spec send_file(Opts, Filename, JSON) -> Results
-    when Filename :: string(), JSON :: json(), Opts :: [{_,_}],
+-spec send_file(AptestCfg, Filename, JSON) -> Results
+    when Filename :: string(), JSON :: json(), AptestCfg :: [{_,_}],
          Results :: [send_file_result()].
-send_file(Opts, Filename, JSON) ->
+send_file(AptestCfg, Filename, JSON) ->
     {ok, B} = file:read_file(Filename),
     Conns = parse_conninfo(B),
     MkOpts = fun(ACert, AKey) ->
-                     SslOpts = {ssl_opts, [
-                                           {apns_cert, ACert},
-                                           {apns_key, AKey}
-                                          ]},
-                     lists:keystore(ssl_opts, 1, Opts, SslOpts)
+                     SslCfg = {ssl_opts, [{apns_cert, ACert},
+                                          {apns_key, AKey}]},
+                     lists:keystore(ssl_opts, 1, AptestCfg, SslCfg)
              end,
     [{{Cert, Key}, send_mult(MkOpts(Cert, Key), JSON, Tokens)}
      || {{Cert, Key}, Tokens} <- validate_conninfo(Conns)].
 
 %%--------------------------------------------------------------------
--spec send_mult(Opts, JSON, Tokens) -> Results
-    when Opts :: [{atom(), string()}],
+-spec send_mult(AptestCfg, JSON, Tokens) -> Results
+    when AptestCfg :: [{atom(), string()}],
          JSON :: json(), Tokens :: tokens(),
          Results :: send_mult_results().
-send_mult(Opts, JSON, Tokens) ->
-    SSLCfg = sc_util:req_val(ssl_opts, Opts),
-    APNSCert = sc_util:req_val(certfile, SSLCfg),
+send_mult(AptestCfg, JSON, Tokens) ->
+    SSLCfg = sc_util:req_val(ssl_opts, AptestCfg),
+    APNSCert = sc_util:req_val(apns_cert, SSLCfg),
     Env = get_cert_env(APNSCert),
     {Host, Port} = host_info(Env),
-    Topic = get_topic(Opts),
     SSLOpts = make_ssl_opts(SSLCfg),
     Wrap = fun(ok, Tok) ->
                    {ok, Tok};
@@ -140,7 +148,7 @@ send_mult(Opts, JSON, Tokens) ->
     case start_client(Host, Port, SSLOpts) of
         {ok, Pid} ->
             try
-                [Wrap(send_impl(Pid, Tok, Topic, JSON), Tok)
+                [Wrap(send_impl(Pid, Tok, JSON, AptestCfg), Tok)
                  || Tok <- Tokens]
             after
                 _ = stop_client(Pid),
@@ -152,8 +160,8 @@ send_mult(Opts, JSON, Tokens) ->
 
 %%--------------------------------------------------------------------
 -spec send_impl(Pid, Token, JSON, Opts) -> Result when
-      Pid :: pid(), Token :: token(), JSON :: json(), Opts :: [{_,_}],
-      Result :: send_result().
+      Pid :: pid(), Token :: token(), JSON :: json(),
+      Opts :: cmdline_opts(), Result :: send_result().
 send_impl(Pid, Token, JSON, Opts) ->
     HTTPPath = to_bin([<<"/3/device/">>, Token]),
     ReqHdrs = [{<<":method">>, <<"POST">>},
@@ -327,13 +335,13 @@ parse_resp_body([<<RespBody/bytes>>]) ->
 
 
 %%--------------------------------------------------------------------
--spec get_topic(Opts) -> Topic
-    when Opts :: list(), Topic :: binary().
-get_topic(Opts) ->
-    case sc_util:req_val(topic, Opts) of
+-spec get_topic(AptestCfg) -> Topic
+    when AptestCfg :: cmdline_opts(), Topic :: topic().
+get_topic(AptestCfg) ->
+    case sc_util:req_val(topic, AptestCfg) of
         [] ->
-            SSLOpts = sc_util:req_val(ssl_opts, Opts),
-            CertFile = sc_util:req_val(certfile, SSLOpts),
+            SSLCfg = sc_util:req_val(ssl_opts, AptestCfg),
+            CertFile = sc_util:req_val(apns_cert, SSLCfg),
             {ok, BCert} = file:read_file(CertFile),
             DecodedCert = apns_cert:decode_cert(BCert),
             #{subject_uid := Topic} = apns_cert:get_cert_info_map(DecodedCert),
@@ -433,7 +441,8 @@ reason_desc(<<Other/bytes>>) ->
     Other.
 
 %%--------------------------------------------------------------------
--spec make_ssl_opts([{atom(), string()}]) -> [{atom(), term()}].
+-spec make_ssl_opts(SslCfg) -> SslOpts when
+      SslCfg :: ssl_cfg(), SslOpts :: ssl_opts().
 make_ssl_opts(SSLCfg) ->
     APNSCert = sc_util:req_val(apns_cert, SSLCfg),
     APNSKey = sc_util:req_val(apns_key, SSLCfg),
