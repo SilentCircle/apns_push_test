@@ -1,9 +1,8 @@
 -module(aptest_apnsv3).
 -export([
          send/4,
-         send_file/3,
          format_apns_error/1,
-         make_ssl_opts/1
+         make_auth_opts/1
         ]).
 
 -import(aptest_util, [msg/2, err_msg/2]).
@@ -15,12 +14,13 @@
 %%% Types
 %%%-------------------------------------------------------------------
 -type apns_env() :: prod | dev.
+-type apns_auth() :: {apns_auth, string()}.
+-type apns_issuer() :: {apns_issuer, string()}.
+-type apns_auth_info() :: apns_auth() | apns_issuer().
 -type json() :: binary().
 -type topic() :: binary().
 -type token() :: binary().
--type tokens() :: [token()].
 -type cert_filename() :: string().
--type key_filename() :: string().
 -type http2_header() :: {binary(), binary()}.
 -type http2_headers() :: [http2_header()].
 -type http2_body() :: [binary()].
@@ -29,19 +29,17 @@
 -type connect_result() :: ok | connect_error().
 -type send_error() :: {error, http2_resp()}.
 -type send_result() :: ok | send_error().
--type apns_cert_files() :: {cert_filename(), key_filename()}.
--type send_mult_result() :: {ok, token()}
-                          | {error, {http2_resp(), token()}}.
--type send_mult_results() :: [send_mult_result()].
--type send_file_result() :: {apns_cert_files(), send_mult_results()}.
 
--type ssl_cfg_key() :: apns_cert
-                     | apns_key
-                     | apns_ca_cert.
--type ssl_cfg_item() :: {ssl_cfg_key(), string()}.
--type ssl_cfg() :: [ssl_cfg_item()].
+-type auth_cfg_key() :: apns_cert
+                      | apns_key
+                      | apns_ca_cert
+                      | apns_auth
+                      | apns_issuer.
+-type auth_cfg_item() :: {auth_cfg_key(), string()}.
+-type auth_cfg() :: [auth_cfg_item()].
 
--type ssl_opts() :: [ssl:ssl_option()].
+-type auth_opt() :: ssl:ssl_option() | apns_auth_info().
+-type auth_opts() :: [auth_opt()].
 
 -type cmdline_opts() :: aptest_cmdline:config().
 
@@ -50,20 +48,25 @@
 %%%-------------------------------------------------------------------
 
 %%--------------------------------------------------------------------
--spec start_client(Host, Port, SSLOpts) -> Result when
-      Host :: string(), Port :: non_neg_integer(),
-      SSLOpts :: [term()], Result :: {ok, pid()} | {error, term()}.
-start_client(Host, Port, SSLOpts) ->
-    msg("Connecting with HTTP/2 to ~s:~B~n", [Host, Port]),
-    msg("SSL Opts: ~p~n", [SSLOpts]),
+-spec start_client(Scheme, Host, Port, AuthOpts) -> Result when
+      Scheme :: http | https, Host :: string(), Port :: non_neg_integer(),
+      AuthOpts :: [term()], Result :: {ok, pid()} | {error, term()}.
+start_client(Scheme, Host, Port, AuthOpts) when Scheme == https orelse
+                                                Scheme == http ->
+    msg("Connecting with HTTP/2 to ~p://~s:~B~n", [Scheme, Host, Port]),
+    msg("Auth Opts: ~p~n", [AuthOpts]),
+    Mod = fmt_module(Scheme),
     OldTrap = process_flag(trap_exit, true),
-    try timer:tc(h2_client, start_link, [https, Host, Port, SSLOpts]) of
+    try timer:tc(h2_client, start_link, [Scheme, Host, Port, AuthOpts]) of
         {T, {ok, _}=Result} ->
             msg("Connected in ~B microseconds.~n", [T]),
             Result;
         {_, {error, {{badmatch, Error}, _StackTrace}}} ->
-            SslError = ssl:format_error(Error),
-            {error, {connection_error, SslError}}
+            FmtError = Mod:format_error(Error),
+            {error, {connection_error, FmtError}};
+        {_, {error, Error}} ->
+            FmtError = Mod:format_error(Error),
+            {error, {connection_error, FmtError}}
     catch
         Class:Reason ->
             err_msg("[~p:~p] Exception, class: ~p, reason: ~p~n",
@@ -74,6 +77,10 @@ start_client(Host, Port, SSLOpts) ->
     end.
 
 %%--------------------------------------------------------------------
+fmt_module(http)  -> inet;
+fmt_module(https) -> ssl.
+
+%%--------------------------------------------------------------------
 -spec stop_client(Pid) -> ok when Pid :: pid().
 stop_client(Pid) ->
     ok = h2_client:stop(Pid).
@@ -82,9 +89,9 @@ stop_client(Pid) ->
 -spec connect(Opts, Env) -> Result
     when Opts :: list(), Env :: apns_env(), Result :: connect_result().
 connect(Opts, Env) when Env =:= prod; Env =:= dev ->
-    SSLOpts = sc_util:req_val(ssl_opts, Opts),
-    {Host, Port} = get_apns_conninfo(Env, Opts),
-    case start_client(Host, Port, SSLOpts) of
+    AuthOpts = sc_util:val(auth_opts, Opts, []),
+    {Scheme, Host, Port} = get_apns_conninfo(Env, Opts),
+    case start_client(Scheme, Host, Port, AuthOpts) of
         {ok, Pid} ->
             msg("Connected ok, disconnecting.~n", []),
             _ = stop_client(Pid);
@@ -97,12 +104,12 @@ connect(Opts, Env) when Env =:= prod; Env =:= dev ->
       Token :: token(), JSON :: json(), Opts :: list(),
       Env :: apns_env(), Result :: send_result().
 send(Token, JSON, Opts, Env) when Env =:= prod; Env =:= dev ->
-    {Host, Port} = get_apns_conninfo(Env, Opts),
-    SSLOpts = sc_util:req_val(ssl_opts, Opts),
-    case start_client(Host, Port, SSLOpts) of
+    {Scheme, Host, Port} = get_apns_conninfo(Env, Opts),
+    AuthOpts = sc_util:val(auth_opts, Opts, []),
+    case start_client(Scheme, Host, Port, AuthOpts) of
         {ok, Pid} ->
             try
-                send_impl(Pid, Token, JSON, Opts)
+                send_impl(Scheme, Pid, Token, JSON, Opts)
             catch
                 _:Reason ->
                     Reason
@@ -114,59 +121,14 @@ send(Token, JSON, Opts, Env) when Env =:= prod; Env =:= dev ->
     end.
 
 %%--------------------------------------------------------------------
--spec send_file(AptestCfg, Filename, JSON) -> Results
-    when Filename :: string(), JSON :: json(), AptestCfg :: [{_,_}],
-         Results :: [send_file_result()].
-send_file(AptestCfg, Filename, JSON) ->
-    {ok, B} = file:read_file(Filename),
-    Conns = parse_conninfo(B),
-    MkOpts = fun(ACert, AKey) ->
-                     SslCfg = {ssl_opts, [{apns_cert, ACert},
-                                          {apns_key, AKey}]},
-                     lists:keystore(ssl_opts, 1, AptestCfg, SslCfg)
-             end,
-    [{{Cert, Key}, send_mult(MkOpts(Cert, Key), JSON, Tokens)}
-     || {{Cert, Key}, Tokens} <- validate_conninfo(Conns)].
-
-%%--------------------------------------------------------------------
--spec send_mult(AptestCfg, JSON, Tokens) -> Results
-    when AptestCfg :: [{atom(), string()}],
-         JSON :: json(), Tokens :: tokens(),
-         Results :: send_mult_results().
-send_mult(AptestCfg, JSON, Tokens) ->
-    SSLCfg = sc_util:req_val(ssl_opts, AptestCfg),
-    APNSCert = sc_util:req_val(apns_cert, SSLCfg),
-    Env = get_cert_env(APNSCert),
-    {Host, Port} = host_info(Env),
-    SSLOpts = make_ssl_opts(SSLCfg),
-    Wrap = fun(ok, Tok) ->
-                   {ok, Tok};
-              ({error, Err}, Tok) ->
-                   {error, {Err, Tok}}
-           end,
-
-    case start_client(Host, Port, SSLOpts) of
-        {ok, Pid} ->
-            try
-                [Wrap(send_impl(Pid, Tok, JSON, AptestCfg), Tok)
-                 || Tok <- Tokens]
-            after
-                _ = stop_client(Pid),
-                msg("Disconnected.~n", [])
-            end;
-        {error, _Reason} = Error ->
-            Error
-    end.
-
-%%--------------------------------------------------------------------
--spec send_impl(Pid, Token, JSON, Opts) -> Result when
-      Pid :: pid(), Token :: token(), JSON :: json(),
+-spec send_impl(Scheme, Pid, Token, JSON, Opts) -> Result when
+      Scheme :: https | http, Pid :: pid(), Token :: token(), JSON :: json(),
       Opts :: cmdline_opts(), Result :: send_result().
-send_impl(Pid, Token, JSON, Opts) ->
+send_impl(Scheme, Pid, Token, JSON, Opts) ->
     HTTPPath = to_bin([<<"/3/device/">>, Token]),
     ReqHdrs = [{<<":method">>, <<"POST">>},
                {<<":path">>, HTTPPath},
-               {<<":scheme">>, <<"https">>}
+               {<<":scheme">>, sc_util:to_bin(Scheme)}
               ] ++ maybe_prop(apns_id, Opts)
                 ++ maybe_prop(apns_topic, Opts)
                 ++ maybe_prop(apns_expiration, Opts)
@@ -222,7 +184,7 @@ sync_req(Pid, ReqHdrs, ReqBody) ->
 format_apns_error({RespHdrs, RespBody}) ->
     Id = sc_util:req_val(<<"apns-id">>, RespHdrs),
     S = sc_util:req_val(<<":status">>, RespHdrs),
-    SD = status_desc(S),
+    SD = apns_lib_http2:status_desc(S),
     {Fmt, Args} = parsed_resp_body_fmt(Id, S, SD, parse_resp_body(RespBody)),
     io_lib:format(Fmt, Args).
 
@@ -239,7 +201,7 @@ parsed_resp_body_fmt(Id, S, SD, [{Rsn, EJSON}]) ->
      "reason:         ~s~n"
      "reason_desc:    ~s~n"
      "ejson:          ~p~n",
-     [Id, S, SD, Rsn, reason_desc(Rsn), EJSON]};
+     [Id, S, SD, Rsn, apns_lib_http2:reason_desc(Rsn), EJSON]};
 parsed_resp_body_fmt(Id, S, SD, [{Rsn, TS, EJSON}]) ->
     {"id:             ~s~n"
      "status:         ~s~n"
@@ -249,63 +211,12 @@ parsed_resp_body_fmt(Id, S, SD, [{Rsn, TS, EJSON}]) ->
      "timestamp:      ~B~n"
      "timestamp_desc: ~s~n"
      "ejson:          ~p~n",
-     [Id, S, SD, Rsn, reason_desc(Rsn), TS, timestamp_desc(TS), EJSON]}.
+     [Id, S, SD, Rsn, apns_lib_http2:reason_desc(Rsn), TS, timestamp_desc(TS),
+      EJSON]}.
 
 %%%-------------------------------------------------------------------
 %%% Internal Functions
 %%%-------------------------------------------------------------------
-
-%% @doc
-%% ConnData must be newline-separated records.
-%% Each record has two space-delimited fields (one space only).
-%%
-%% Field 1: APNS cert file (.pem) path
-%% Field 2: APNS key file (unencrypted .pem) path
-%% Field 3: Token
-%%
-%% Returns [{{CertFile, KeyFile}, [Token]}].
-%% where CertFile :: binary(), KeyFile :: binary(),
-%%       Token :: binary().
-%% @end
--spec parse_conninfo(ConnData) -> ConnInfo
-    when ConnData :: binary(),
-         ConnInfo :: [{{cert_filename(), key_filename()}, tokens()}].
-parse_conninfo(<<ConnData/binary>>) ->
-    Fields = [binary:split(L, [<<" ">>, <<"\t">>], [global, trim_all])
-              || L <- binary:split(ConnData, <<"\n">>, [global])],
-    %% Collect all the tokens that have the same AppBundleID
-    D = lists:foldl(fun([CF, KF, Token], Dict) ->
-                            dict:append({sc_util:to_list(CF),
-                                         sc_util:to_list(KF)}, Token, Dict);
-                       (X, Dict) ->
-                            io:format(standard_error,
-                                      "Ignoring data: ~p\n", [X]),
-                            Dict
-                    end, dict:new(), Fields),
-    dict:to_list(D).
-
-%%--------------------------------------------------------------------
--spec validate_conninfo(CIs) -> ValidCIs
-    when CIs :: [{{cert_filename(), key_filename()}, tokens()}],
-         ValidCIs :: [{{cert_filename(), key_filename()}, tokens()}].
-validate_conninfo(CIs) ->
-    [ConnInfo || ConnInfo <- CIs, is_valid_conn(ConnInfo)].
-
-%%--------------------------------------------------------------------
-is_valid_conn({{CertFile, KeyFile}, _Tok}) ->
-    lists:all(fun(Filename) -> check_file(Filename) end,
-              [CertFile, KeyFile]).
-
-%%--------------------------------------------------------------------
-check_file(Filename) ->
-    case file:open(Filename, [read]) of
-        {ok, FH} ->
-            ok = file:close(FH),
-            true;
-        {error, _} ->
-            msg("Cannot open file ~s\n", [Filename]),
-            false
-    end.
 
 %%--------------------------------------------------------------------
 maybe_warn_uuid(UUID, UUID) ->
@@ -338,15 +249,17 @@ parse_resp_body([<<RespBody/bytes>>]) ->
 -spec get_topic(AptestCfg) -> Topic
     when AptestCfg :: cmdline_opts(), Topic :: topic().
 get_topic(AptestCfg) ->
-    case sc_util:req_val(topic, AptestCfg) of
+    %Auth = sc_util:req_val(apns_auth, AptestCfg),
+    UserTopic = sc_util:req_val(topic, AptestCfg),
+    case UserTopic of
         [] ->
-            SSLCfg = sc_util:req_val(ssl_opts, AptestCfg),
-            CertFile = sc_util:req_val(apns_cert, SSLCfg),
+            AuthCfg = sc_util:req_val(auth_opts, AptestCfg),
+            CertFile = sc_util:req_val(apns_cert, AuthCfg),
             {ok, BCert} = file:read_file(CertFile),
             DecodedCert = apns_cert:decode_cert(BCert),
             #{subject_uid := Topic} = apns_cert:get_cert_info_map(DecodedCert),
             Topic;
-        UserTopic ->
+        _ ->
             list_to_binary(UserTopic)
     end.
 
@@ -357,96 +270,12 @@ timestamp_desc(TS) when is_integer(TS), TS >= 0 ->
     to_bin(posix_ms_to_iso8601(TS)).
 
 %%--------------------------------------------------------------------
-status_desc(<<"200">>) ->
-    <<"Success">>;
-status_desc(<<"400">>) ->
-    <<"Bad request">>;
-status_desc(<<"403">>) ->
-    <<"There was an error with the certificate.">>;
-status_desc(<<"405">>) ->
-    <<
-      "The request used a bad :method value. Only POST requests are "
-      "supported."
-    >>;
-status_desc(<<"410">>) ->
-    <<"The device token is no longer active for the topic.">>;
-status_desc(<<"413">>) ->
-    <<"The notification payload was too large.">>;
-status_desc(<<"429">>) ->
-    <<"The server received too many requests for the same device token.">>;
-status_desc(<<"500">>) ->
-    <<"Internal server error">>;
-status_desc(<<"503">>) ->
-    <<"The server is shutting down and unavailable.">>;
-status_desc(<<B/bytes>>) ->
-    to_bin([<<"Unknown status ">>, B]).
-
-%%--------------------------------------------------------------------
-reason_desc(<<"PayloadEmpty">>) ->
-    <<"The message payload was empty.">>;
-reason_desc(<<"PayloadTooLarge">>) ->
-    <<"The message payload was too large. The maximum payload size is 4096 "
-      "bytes.">>;
-reason_desc(<<"BadTopic">>) ->
-    <<"The apns-topic was invalid.">>;
-reason_desc(<<"TopicDisallowed">>) ->
-    <<"Pushing to this topic is not allowed.">>;
-reason_desc(<<"BadMessageId">>) ->
-    <<"The apns-id value is bad.">>;
-reason_desc(<<"BadExpirationDate">>) ->
-    <<"The apns-expiration value is bad.">>;
-reason_desc(<<"BadPriority">>) ->
-    <<"The apns-priority value is bad.">>;
-reason_desc(<<"MissingDeviceToken">>) ->
-    <<"The device token is not specified in the request :path. Verify that "
-      "the :path header contains the device token.">>;
-reason_desc(<<"BadDeviceToken">>) ->
-    <<
-      "The specified device token was bad. Verify that the request contains "
-      "a valid token and that the token matches the environment."
-    >>;
-reason_desc(<<"DeviceTokenNotForTopic">>) ->
-    <<"The device token does not match the specified topic.">>;
-reason_desc(<<"Unregistered">>) ->
-    <<"The device token is inactive for the specified topic.">>;
-reason_desc(<<"DuplicateHeaders">>) ->
-    <<"One or more headers were repeated.">>;
-reason_desc(<<"BadCertificateEnvironment">>) ->
-    <<"The client certificate was for the wrong environment.">>;
-reason_desc(<<"BadCertificate">>) ->
-    <<"The certificate was bad.">>;
-reason_desc(<<"Forbidden">>) ->
-    <<"The specified action is not allowed.">>;
-reason_desc(<<"BadPath">>) ->
-    <<"The request contained a bad :path value.">>;
-reason_desc(<<"MethodNotAllowed">>) ->
-    <<"The specified :method was not POST.">>;
-reason_desc(<<"TooManyRequests">>) ->
-    <<"Too many requests were made consecutively to the same device token.">>;
-reason_desc(<<"IdleTimeout">>) ->
-    <<"Idle time out.">>;
-reason_desc(<<"Shutdown">>) ->
-    <<"The server is shutting down.">>;
-reason_desc(<<"InternalServerError">>) ->
-    <<"An internal server error occurred.">>;
-reason_desc(<<"ServiceUnavailable">>) ->
-    <<"The service is unavailable.">>;
-reason_desc(<<"MissingTopic">>) ->
-    <<
-      "The apns-topic header of the request was not specified and was "
-      "required. The apns-topic header is mandatory when the client is "
-      "connected using a certificate that supports multiple topics."
-    >>;
-reason_desc(<<Other/bytes>>) ->
-    Other.
-
-%%--------------------------------------------------------------------
--spec make_ssl_opts(SslCfg) -> SslOpts when
-      SslCfg :: ssl_cfg(), SslOpts :: ssl_opts().
-make_ssl_opts(SSLCfg) ->
-    APNSCert = sc_util:req_val(apns_cert, SSLCfg),
-    APNSKey = sc_util:req_val(apns_key, SSLCfg),
-    APNSCACert = case sc_util:val(apns_ca_cert, SSLCfg, []) of
+-spec make_auth_opts(AuthCfg) -> AuthOpts when
+      AuthCfg :: auth_cfg(), AuthOpts :: auth_opts().
+make_auth_opts(AuthCfg) ->
+    APNSCert = sc_util:req_val(apns_cert, AuthCfg),
+    APNSKey = sc_util:req_val(apns_key, AuthCfg),
+    APNSCACert = case sc_util:val(apns_ca_cert, AuthCfg, []) of
                      [] ->
                          "/etc/ssl/certs/ca-certificates.crt";
                      CAFile ->
@@ -480,15 +309,23 @@ host_info(dev) ->  {"api.development.push.apple.com", 443}.
 %%--------------------------------------------------------------------
 -spec get_apns_conninfo(Env, Opts) -> Result when
       Env :: apns_env(), Opts :: [{atom(), term()}],
-      Result :: {Host, Port}, Host :: string(), Port :: non_neg_integer().
+      Result :: {Scheme, Host, Port}, Scheme :: https | http,
+      Host :: string(), Port :: non_neg_integer().
 get_apns_conninfo(Env, Opts) ->
     {DefHost, DefPort} = host_info(Env),
     Host = case string:strip(proplists:get_value(apns_host, Opts, "")) of
                "" -> DefHost;
                H  -> H
            end,
-    {_, Port} = aptest_util:prop(apns_port, Opts, DefPort),
-    {Host, Port}.
+    Port = case sc_util:val(apns_port, Opts, DefPort) of
+               -1        -> DefPort;
+               OtherPort -> OtherPort
+           end,
+    Scheme = case sc_util:val(no_ssl, Opts, false) of
+                 true  -> http;
+                 false -> https
+             end,
+    {Scheme, Host, Port}.
 
 %%--------------------------------------------------------------------
 -spec get_cert_env(CertFile) -> Result when

@@ -38,20 +38,12 @@ do_main(Args) ->
         {error, _Errmsg} = Err ->
             Err;
         {ok, {Action, Config}} ->
-            try_run(Action, Config)
+            run(Action, Config)
     catch
         Class:Reason ->
             err_msg("Class: ~p, Reason: ~p~n", [Class, Reason]),
             {exception, Class, Reason}
     end.
-
-%%--------------------------------------------------------------------
--spec try_run(Action, Config) -> Result when
-      Action :: aptest_cmdline:action(),
-      Config :: aptest_cmdline:config(),
-      Result :: terminate_arg().
-try_run(Action, Config) ->
-    run(Action, Config).
 
 %%--------------------------------------------------------------------
 -spec run(Action, Config) -> Result when
@@ -62,8 +54,6 @@ run(action_connect, Config) ->
     connect(Config);
 run(action_send, Config) ->
     send(Config);
-run(action_sendfile, Config) ->
-    send_file(Config);
 run(action_showcert, Config) ->
     show_cert(Config);
 run(Action, Config) ->
@@ -112,20 +102,12 @@ version(PgmName) ->
     end.
 
 %%--------------------------------------------------------------------
-connect(Config) ->
-    {_, AptestCfg} = aptest_util:req_prop(aptest, Config),
-    {_, SSLCfg} = aptest_util:req_prop(ssl_opts, Config),
-
-    {ok, _Apps} = application:ensure_all_started(ssl),
-
-    APNSVersion = sc_util:req_val(apns_version, AptestCfg),
-    Mod = list_to_atom("aptest_apnsv" ++ integer_to_list(APNSVersion)),
-
-    SSLOpts = Mod:make_ssl_opts(SSLCfg),
-    APNSEnv = sc_util:req_val(apns_env, AptestCfg),
-    Opts = [{ssl_opts, SSLOpts} | AptestCfg],
-
-    case Mod:connect(Opts, APNSEnv) of
+connect(Config0) ->
+    {_, AptestCfg} = aptest_util:req_prop(aptest, Config0),
+    Env = sc_util:req_val(apns_env, AptestCfg),
+    Config = combine_configs(Config0),
+    CallbackMod = sc_util:req_val(mod, Config),
+    case CallbackMod:connect(Config, Env) of
         ok ->
             0;
         Error ->
@@ -136,12 +118,7 @@ connect(Config) ->
 %%--------------------------------------------------------------------
 send(Config) ->
     {_, AptestCfg} = aptest_util:req_prop(aptest, Config),
-    {_, SSLCfg} = aptest_util:req_prop(ssl_opts, Config),
-
     {ok, _Apps} = application:ensure_all_started(ssl),
-
-    APNSVersion = sc_util:req_val(apns_version, AptestCfg),
-    Mod = list_to_atom("aptest_apnsv" ++ integer_to_list(APNSVersion)),
 
     JSON = case sc_util:req_val(no_json, AptestCfg) of
                true ->
@@ -149,18 +126,19 @@ send(Config) ->
                false ->
                    make_json(AptestCfg)
            end,
-    SSLOpts = Mod:make_ssl_opts(SSLCfg),
-    Opts = [{ssl_opts, SSLOpts} | AptestCfg],
 
     Token = sc_util:to_bin(sc_util:req_val(apns_token, AptestCfg)),
-    APNSEnv = sc_util:req_val(apns_env, AptestCfg),
 
-    try Mod:send(Token, JSON, Opts, APNSEnv) of
+    CombinedConfig = combine_configs(Config),
+    Env = sc_util:req_val(apns_env, AptestCfg),
+    CallbackMod = sc_util:req_val(mod, CombinedConfig),
+    try CallbackMod:send(Token, JSON, CombinedConfig, Env) of
         ok ->
             msg("Pushed without receiving APNS error!~n", []),
             0;
         {error, {[{_,_}|_] = _Hdrs, <<_Body/binary>>}=AE} ->
-            err_msg("APNS error:~n~s~n", [Mod:format_apns_error(AE)]),
+            err_msg("APNS error:~n~s~n",
+                    [CallbackMod:format_apns_error(AE)]),
             1;
         {error, {connection_error, ErrorText}} ->
             err_msg("Connection error: ~s~n", [ErrorText]),
@@ -175,73 +153,32 @@ send(Config) ->
     end.
 
 %%--------------------------------------------------------------------
-send_file(Config) ->
-    {_, AptestCfg} = aptest_util:req_prop(aptest, Config),
-
-    {ok, _Apps} = application:ensure_all_started(ssl),
-
-    case sc_util:val(apns_version, AptestCfg) of
-        X when X =:= undefined; X =:= 3 ->
-            ok;
-        V ->
-            msg("--file only works with APNS v3, ignoring version ~B", [V])
-    end,
-    Mod = aptest_apnsv3,
-
-    Filename = sc_util:req_val(file, AptestCfg),
-    JSON = case sc_util:req_val(raw_json, AptestCfg) of
-               [] ->
-                   Message = sc_util:req_val(message, AptestCfg),
-                   Badge = sc_util:req_val(badge, AptestCfg),
-                   Sound = sc_util:req_val(sound, AptestCfg),
-                   Notification = make_notification(Message, Badge, Sound),
-                   apns_json:make_notification(Notification);
-               RawJSON ->
-                   sc_util:to_bin(RawJSON)
-           end,
-    %% Results :: list(CertKeyResult),
-    %% CertKeyResult :: {{CertFilename,KeyFilename}, [Result]}
-    _ = [handle_sendfile_result(Result, Mod)
-         || Result <- Mod:send_file(AptestCfg, Filename, JSON)],
-    0
-    .
-
-%%--------------------------------------------------------------------
 show_cert(Config) ->
-    {_, SSLCfg} = aptest_util:req_prop(ssl_opts, Config),
-
-    {ok, _Apps} = application:ensure_all_started(ssl),
-
-    APNSCert = sc_util:req_val(apns_cert, SSLCfg),
-    {ok, Cert} = file:read_file(APNSCert),
-    DecodedCert = apns_cert:decode_cert(Cert),
-    CertMap = apns_cert:get_cert_info_map(DecodedCert),
-    {Pairs, MaxName} = format_cert_info(CertMap),
-    Fmt = "~-" ++ integer_to_list(MaxName + 2) ++ "s~s\n",
-    _ = [io:format(Fmt, [Name, Val]) || {Name, Val} <- lists:sort(Pairs)],
-    0
-    .
-
-
-%%--------------------------------------------------------------------
-handle_sendfile_result({{CertFile,KeyFile}, Results}, Mod) ->
-    {Good, Bad} = lists:partition(fun({ok, _}) -> true;
-                                     (_)       -> false
-                                  end, Results),
-
-    msg("Results for cert file ~s, key file ~s\n", [CertFile, KeyFile], no_ts),
-    msg("Successes: ~B, Failures: ~B\n\n", [length(Good), length(Bad)], no_ts),
-    case Bad of
-        [] ->
-            0;
+    {_, Aptest} = aptest_util:req_prop(aptest, Config),
+    case sc_util:val(no_ssl, Aptest) of
+        true ->
+            _ = io:format("no_ssl was selected, cannot view cert");
         _ ->
-            lists:foreach(
-              fun({error, {AE, Token}}) ->
-                    err_msg("Error for ~s:\n~s\n",
-                            [Token, Mod:format_apns_error(AE)])
-              end, Bad),
-            1
+            {ok, _Apps} = application:ensure_all_started(ssl),
+            {_, AuthCfg} = aptest_util:req_prop(auth_opts, Config),
+            case sc_util:val(apns_auth, AuthCfg) of
+                [] ->
+                    APNSCert = sc_util:req_val(apns_cert, AuthCfg),
+                    {ok, Cert} = file:read_file(APNSCert),
+                    DecodedCert = apns_cert:decode_cert(Cert),
+                    CertMap = apns_cert:get_cert_info_map(DecodedCert),
+                    {Pairs, MaxName} = format_cert_info(CertMap),
+                    Fmt = "~-" ++ integer_to_list(MaxName + 2) ++ "s~s\n",
+                    _ = [io:format(Fmt, [Name, Val]) ||
+                         {Name, Val} <- lists:sort(Pairs)],
+                    0;
+                Auth ->
+                    _ = io:format("apns_auth=~s takes precedence over "
+                                  "certificates", [Auth]),
+                    0
+            end
     end.
+
 
 %%--------------------------------------------------------------------
 make_notification(Message, Badge, Sound) ->
@@ -289,9 +226,46 @@ format_cert_info(#{} = CertInfo) ->
               {[{BName, BVal}|L], max(Max, byte_size(BName))}
       end, {[], 0}, maps:to_list(CertInfo)).
 
+%%--------------------------------------------------------------------
 format_topics(Topics) ->
     list_to_binary(lists:foldl(fun({K, V}, Acc) ->
                                        [[K, $:, $\s, V, $;, $\s]|Acc]
                                end, [], Topics)).
+
+%%--------------------------------------------------------------------
+-spec module_for_version(Vsn) -> Module when
+      Vsn :: pos_integer(), Module :: atom().
+module_for_version(Vsn) when is_integer(Vsn), Vsn > 0 ->
+    list_to_atom("aptest_apnsv" ++ integer_to_list(Vsn)).
+
+%%--------------------------------------------------------------------
+-spec combine_configs(Config) -> Result when
+      Config :: list(), Result :: list().
+combine_configs(Config) ->
+    {_, AptestCfg} = aptest_util:req_prop(aptest, Config),
+    APNSVersion = sc_util:req_val(apns_version, AptestCfg),
+    Mod = module_for_version(APNSVersion),
+    case sc_util:val(no_ssl, AptestCfg, false) of
+        true ->
+            [{mod, Mod}, {auth_opts, []} | AptestCfg];
+        false ->
+            {ok, _Apps} = application:ensure_all_started(ssl),
+            {_, AuthCfg} = aptest_util:req_prop(auth_opts, Config),
+
+            case sc_util:val(apns_auth, AuthCfg) of
+                [] ->
+                    AuthOpts = Mod:make_auth_opts(AuthCfg),
+                    [{mod, Mod}, {auth_opts, AuthOpts} | AptestCfg];
+                Auth ->
+                    case APNSVersion > 2 of
+                        true ->
+                            AuthOpts = Mod:make_auth_opts(AuthCfg),
+                            [{mod, Mod}, {auth_opts, AuthOpts} | AptestCfg];
+                        false ->
+                            throw({incompatible_opts,
+                                   {apns_auth, Auth, apns_version, APNSVersion}})
+                    end
+            end
+    end.
 
 % ex: set ft=erlang fenc=utf-8 sts=4 ts=4 sw=4 et:
