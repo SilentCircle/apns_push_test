@@ -75,7 +75,7 @@ send(Token, JSON, Opts, Env) when Env =:= prod; Env =:= dev ->
 
     case start_client(Scheme, Host, Port, SSLOpts) of
         {ok, Sock} ->
-            send_impl(Sock, Id, Exp, BToken, JSON, Prio);
+            send_impl(Mod, Sock, Id, Exp, BToken, JSON, Prio);
         {error, _Reason} = Error ->
             Error
     end.
@@ -149,8 +149,8 @@ wait_for_resp(Proto, Timeout) ->
     wait_for_resp(Proto, Closed, Timeout, ok).
 
 %%--------------------------------------------------------------------
-wait_for_resp(Proto, Closed, Timeout, Status) when Proto == tcp orelse
-                                                   Proto == ssl ->
+wait_for_resp(Proto, _Closed, Timeout, Status) when Proto == tcp orelse
+                                                    Proto == ssl ->
     receive
         {Proto, _Socket, Data} ->
             msg("Received ~p data: ~p~n", [Proto, Data]),
