@@ -1,4 +1,6 @@
 -module(aptest_cmdline).
+%% DEBUG
+-compile(export_all).
 
 %%====================================================================
 %% API Exports
@@ -44,26 +46,27 @@
 -spec option_spec_list() -> opt_specs().
 option_spec_list() ->
     [
-     {action_send,     undefined, "send",            undefined,               "Send notification"                      },
+     {action_help,     $h,        "help",            undefined,               "Show help"                              },
      {action_connect,  undefined, "connect",         undefined,               "Test connection to APNS"                },
+     {action_send,     undefined, "send",            undefined,               "Send notification"                      },
      {action_showcert, undefined, "showcert",        undefined,               "Show certificate information"           },
-     {apns_auth,       $a,        "apns-auth",       {string, ""},            "APNS auth private key file"             },
-     {apns_cert,       $c,        "apns-cert",       {string, ""},            "APNS certificate file"                  },
+     {action_version,  undefined, "version",         undefined,               "Show aptest version"                    },
+     {apns_auth,       $a,        "apns-auth",       {string, ""},            "APNS token-based auth private key file" },
+     {apns_cert,       $c,        "apns-cert",       {string, ""},            "APNS TLS certificate file"              },
      {apns_ca_cert,    $A,        "apns-ca-cert",    {string, ""},            "APNS CA chain certificate file"         },
      {apns_env,        $e,        "apns-env",        {atom, prod},            "APNS environment (prod|dev)"            },
      {apns_expiration, $x,        "apns-expiration", {integer, -1},           "APNS expiration time (optional)"        },
-     {apns_key,        $k,        "apns-key",        {string, ""},            "APNS private key file"                  },
+     {apns_key,        $k,        "apns-key",        {string, ""},            "APNS TLS certificate private key file"  },
      {apns_host,       $H,        "apns-host",       {string, ""},            "APNS host (optional)"                   },
      {apns_id,         $i,        "apns-id",         {string, ""},            "APNS uuid (optional)"                   },
-     {apns_issuer,     $I,        "apns-issuer",     {string, ""},            "APNS issuer (required for apns-auth)"   },
-     {apns_kid,        $K,        "apns-kid",        {string, ""},            "APNS JWT kid (required for apns-auth)"  },
+     {apns_issuer,     $I,        "apns-issuer",     {string, ""},            "APNS JWT `iss` (for apns-auth)"         },
+     {apns_kid,        $K,        "apns-kid",        {string, ""},            "APNS JWT `kid` (for apns-auth)"         },
      {apns_port,       $p,        "apns-port",       {integer, -1},           "APNS port (optional)"                   },
      {apns_priority,   $P,        "apns-priority",   {integer, -1},           "APNS priority (optional)"               },
      {apns_token,      $t,        "apns-token",      {string, ""},            "APNS hexadecimal token"                 },
-     {apns_topic,      $T,        "apns-topic",      {string, ""},            "APNS topic (defaults to cert topic)"    },
+     {apns_topic,      $T,        "apns-topic",      {string, ""},            "APNS topic (required for apns-auth)"    },
      {apns_version,    $v,        "apns-version",    {integer,  3},           "APNS protocol version"                  },
      {badge,           $b,        "badge",           {integer, -1},           "APNS badge count [-1: unchanged]"       },
-     {help,            $h,        "help",            undefined,               "Show help"                              },
      {message,         $m,        "message",         {string, ""},            "APNS alert text"                        },
      {no_check_json,   $n,        "no-check-json",   {boolean, false},        "Allow invalid raw JSON"                 },
      {no_json,         $N,        "no-json",         {boolean, false},        "Omit the APNS payload"                  },
@@ -71,8 +74,8 @@ option_spec_list() ->
      {raw_json,        $r,        "raw-json",        {string, ""},            "Raw APNS JSON notification"             },
      {relaxed,         $L,        "relaxed-mode",    {boolean, false},        "Allow some invalid notification data"   },
      {sound,           $s,        "sound",           {string, ""},            "APNS sound file name"                   },
-     {verbose,         $V,        "verbose",         {boolean, false},        "Verbose output"                         },
-     {version,         undefined, "version",         undefined,               "Show aptest version"                    }
+     {trace,           undefined, "trace",           {boolean, false},        "Trace output (implies verbose)"         },
+     {verbose,         $V,        "verbose",         {boolean, false},        "Verbose output"                         }
     ].
 
 %%--------------------------------------------------------------------
@@ -82,11 +85,17 @@ option_spec_list() ->
 parse_args(Args) ->
     OptSpecList = option_spec_list(),
     Result = case getopt:parse(OptSpecList, Args) of
-                 {ok, {Opts, NonOpts}} ->
+                 {ok, {Opts0, NonOpts}} ->
+                     % Eliminate duplicate options such that the
+                     % last duplicate option wins
+                     {Ts, NonTs} = lists:partition(fun(X) -> is_tuple(X) end,
+                                                   Opts0),
+                     Opts = NonTs ++ dict:to_list(dict:from_list(Ts)),
                      show_parse_results(Opts, NonOpts),
                      Cfg = make_action_cfg(OptSpecList, Opts, NonOpts),
                      validate_action_cfg(Cfg);
                  Error ->
+                     aptest_util:msg("Error pasring args: ~p", [Error]),
                      Error
              end,
     wrap_result(OptSpecList, Result).
@@ -133,27 +142,78 @@ make_checked_action_cfg(OptSpecList, Opts, NonOpts) ->
       Result :: {ok, {Action, Config}} | {error, Reason},
       Action :: action(), Config :: config(), Reason :: term().
 make_action_cfg(Opts, []) ->
-    try
-        Action = get_action(Opts),
-        AptestCfg = make_aptest_cfg(Action, Opts),
-        AuthCfg = make_auth_cfg(Action, Opts),
-        Cfg = [{aptest, AptestCfg}, {auth_opts, AuthCfg}],
-        {ok, {Action, Cfg}}
+    try make_action_cfg_nocatch(Opts, []) of
+        Result ->
+            Result
     catch
-        throw:Error ->
-            {error, Error}
+        error:Reason ->
+            {error, Reason}
     end;
 make_action_cfg(_Opts, NonOpts) ->
     {error, {invalid_arg, NonOpts}}.
 
 %%--------------------------------------------------------------------
+make_action_cfg_nocatch(Opts, _NonOpts) ->
+    Action = get_action(Opts),
+    AptestCfg = make_aptest_cfg(Action, Opts),
+    AuthCfg = make_auth_cfg(Action, Opts),
+    Cfg = [{aptest, AptestCfg}, {auth_opts, AuthCfg}],
+    {ok, {Action, Cfg}}.
+
+%%--------------------------------------------------------------------
+-spec validate_action_cfg(CfgResult) -> Result when
+      CfgResult :: {ok, {Action, Config}} | {error, Reason},
+      Result :: {ok, {Action, Config}} | {error, Reason},
+      Action :: action(), Config :: config(), Reason :: term().
+
+validate_action_cfg({ok, {Action, Config}}) ->
+    try validate_rules(Action, Config) of
+        Result ->
+            Result
+    catch
+        Class:Reason ->
+            ?trace("{~p, ~p}, stack trace follows:\n: ~p",
+                   [Class, Reason, erlang:get_stacktrace()]),
+            {error, Reason}
+    end;
+validate_action_cfg({error, _}=Error) ->
+    Error.
+
+%%--------------------------------------------------------------------
+validate_rules(Action, Config) ->
+    case lists:keyfind(Action, 1, rules()) of
+        {_, []} ->
+            {ok, {Action, Config}};
+        {_, ActionRules} ->
+            {_, AptestCfg} = aptest_util:req_prop(aptest, Config),
+            {_, AuthCfg} = aptest_util:req_prop(auth_opts, Config),
+            set_log_level(AptestCfg),
+            walk_rules(ActionRules, AptestCfg ++ AuthCfg),
+            {ok, {Action, Config}};
+        false ->
+            {error, {unknown_action, Action}}
+    end.
+
+%%--------------------------------------------------------------------
 -spec info_action(Opts) -> Result when
       Opts :: options(), Result :: {ok, {atom(), []}} | none.
 info_action(Opts) ->
-    lists:foldl(fun(help, none)    -> atom_to_action(help);
-                   (version, none) -> atom_to_action(version);
-                   (_, Acc)        -> Acc
-                end, none, Opts).
+    % Help takes precedence over version
+    InfoActions = [action_help,
+                   action_version],
+    Actions = lists:foldr(fun(Action, Acc) ->
+                                  case lists:member(Action, Opts) of
+                                      true  -> [Action|Acc];
+                                      false -> Acc
+                                  end
+                          end, [], InfoActions),
+
+    case Actions of
+        [Action|_] ->
+            {ok, {Action, []}};
+        [] ->
+            none
+    end.
 
 %%--------------------------------------------------------------------
 -spec get_action(Opts) -> Result when
@@ -178,291 +238,141 @@ get_action(Opts) ->
 %%--------------------------------------------------------------------
 %%--------------------------------------------------------------------
 make_aptest_cfg(action_connect, Opts) ->
-    ValFuns = [fun verbose/1,
-               fun apns_env/1,
-               fun apns_host/1,
-               fun apns_port/1,
-               fun apns_version/1,
-               fun no_ssl/1],
-    lists:foldl(fun(ValFun, Acc) -> [ValFun(Opts)|Acc] end, [], ValFuns);
+    [
+     v(apns_env,     is_valid_apns_env_fun(Opts),     Opts),
+     v(apns_host,    is_nonempty_string_fun(Opts),    Opts),
+     v(apns_port,    is_valid_port_fun(Opts),         Opts),
+     v(apns_version, is_valid_apns_version_fun(Opts), Opts),
+     v(no_ssl,       is_boolean_fun(Opts),            Opts),
+     v(trace,        is_boolean_fun(Opts),            Opts),
+     v(verbose,      is_boolean_fun(Opts),            Opts)
+    ];
 make_aptest_cfg(action_send, Opts) ->
-    ValFuns = [fun apns_env/1,
-               fun apns_expiration/1,
-               fun apns_host/1,
-               fun apns_id/1,
-               fun apns_kid/1,
-               fun apns_port/1,
-               fun apns_priority/1,
-               fun apns_token/1,
-               fun apns_topic/1,
-               fun apns_version/1,
-               fun badge/1,
-               fun message/1,
-               fun no_json/1,
-               fun no_ssl/1,
-               fun raw_json/1,
-               fun relaxed/1,
-               fun sound/1,
-               fun verbose/1],
-    lists:foldl(fun(ValFun, Acc) -> [ValFun(Opts)|Acc] end, [], ValFuns);
+    [
+     v(apns_env,        is_valid_apns_env_fun(Opts),      Opts),
+     v(apns_expiration, is_valid_expiration_fun(Opts),    Opts),
+     v(apns_host,       is_nonempty_string_fun(Opts),     Opts),
+     v(apns_id,         is_valid_apns_id_fun(Opts),       Opts),
+     v(apns_kid,        is_nonempty_string_fun(Opts),     Opts),
+     v(apns_port,       is_valid_port_fun(Opts),          Opts),
+     v(apns_priority,   is_valid_apns_priority_fun(Opts), Opts),
+     v(apns_token,      is_nonempty_string_fun(Opts),     Opts),
+     v(apns_topic,      is_nonempty_string_fun(Opts),     Opts),
+     v(apns_version,    is_valid_apns_version_fun(Opts),  Opts),
+     v(badge,           is_valid_badge_fun(Opts),         Opts),
+     v(message,         is_nonempty_string_fun(Opts),     Opts),
+     v(no_check_json,   is_boolean_fun(Opts),             Opts),
+     v(no_json,         is_boolean_fun(Opts),             Opts),
+     v(no_ssl,          is_boolean_fun(Opts),             Opts),
+     v(raw_json,        is_nonempty_string_fun(Opts),     Opts),
+     v(relaxed,         is_boolean_fun(Opts),             Opts),
+     v(sound,           is_valid_apns_sound_fun(Opts),    Opts),
+     v(trace,           is_boolean_fun(Opts),             Opts),
+     v(verbose,         is_boolean_fun(Opts),             Opts)
+    ];
 make_aptest_cfg(action_showcert, Opts) ->
-    ValFuns = [fun verbose/1],
-    lists:foldl(fun(ValFun, Acc) -> [ValFun(Opts)|Acc] end, [], ValFuns).
+    [
+     v(trace,   is_boolean_fun(Opts), Opts),
+     v(verbose, is_boolean_fun(Opts), Opts)
+    ].
 
 %%--------------------------------------------------------------------
-make_auth_cfg(action_connect, Opts) ->
-    case sc_util:val(no_ssl, Opts, false) of
-        true ->
-            [apns_auth(Opts),
-             apns_issuer(Opts),
-             apns_kid(Opts)];
-        false ->
-            [
-             apns_auth(Opts),
-             apns_issuer(Opts),
-             apns_kid(Opts),
-             apns_cert(Opts),
-             apns_ca_cert(Opts),
-             apns_key(Opts)
-            ]
-    end;
-make_auth_cfg(action_send, Opts) ->
-    case sc_util:val(no_ssl, Opts, false) of
-        true ->
-            [
-             apns_auth(Opts),
-             apns_issuer(Opts),
-             apns_kid(Opts)
-            ];
-        false ->
-            [
-             apns_auth(Opts),
-             apns_issuer(Opts),
-             apns_kid(Opts),
-             apns_cert(Opts),
-             apns_ca_cert(Opts),
-             apns_key(Opts)
-            ]
-    end;
-make_auth_cfg(action_showcert, Opts) ->
-    case sc_util:val(no_ssl, Opts, false) of
-        true ->
-            [
-             apns_auth(Opts)
-            ];
-        false ->
-            [
-             apns_auth(Opts),
-             apns_cert(Opts)
-            ]
+make_auth_cfg(_, Opts) ->
+    [
+     v(apns_auth,       is_readable_file_fun(Opts),    Opts),
+     v(apns_topic,      is_nonempty_string_fun(Opts),  Opts),
+     v(apns_issuer,     is_nonempty_string_fun(Opts),  Opts),
+     v(apns_kid,        is_nonempty_string_fun(Opts),  Opts),
+     v(apns_cert,       is_readable_file_fun(Opts),    Opts),
+     v(apns_ca_cert,    is_readable_file_fun(Opts),    Opts),
+     v(apns_key,        is_readable_file_fun(Opts),    Opts)
+    ].
+
+%%--------------------------------------------------------------------
+v(Opt, Pred, Opts) when is_function(Pred, 1) ->
+    case sc_util:val(Opt, Opts, []) of
+        []  -> {Opt, []};
+        Val -> assert_kv(Pred, {Opt, Val})
     end.
+
+%%--------------------------------------------------------------------
+%% Predicate function creators
+%%--------------------------------------------------------------------
+%%--------------------------------------------------------------------
+is_equal_fun({Value, _Opts}) ->
+    fun(V) -> is_equal(V, Value) end.
+
+%%--------------------------------------------------------------------
+is_string_fun(_Opts) ->
+    fun is_string/1.
+
+%%--------------------------------------------------------------------
+is_nonempty_string_fun(_Opts) ->
+    fun is_nonempty_string/1.
+
+%%--------------------------------------------------------------------
+is_boolean_fun(_Opts) ->
+    fun erlang:is_boolean/1.
+
+%%--------------------------------------------------------------------
+is_integer_range_fun({Min, Max, _Opts}) ->
+    fun(X) -> is_integer_range(X, Min, Max) end.
+
+%%--------------------------------------------------------------------
+is_pos_integer_range_fun({Max, _Opts}) ->
+    fun(X) -> is_pos_integer_range(X, Max) end.
+
+%%--------------------------------------------------------------------
+is_readable_file_fun(_Opts) ->
+    fun(Filename) ->
+        is_list(Filename) andalso filelib:is_regular(Filename)
+    end.
+
+%%--------------------------------------------------------------------
+is_uuid_fun(_Opts) ->
+    fun is_uuid/1.
+
+%%--------------------------------------------------------------------
+is_valid_expiration_fun(Opts) ->
+    fun(V) ->
+            strict(Opts, V, is_integer_range_fun({-1, 16#FFFFFFFF, Opts}))
+    end.
+
+%%--------------------------------------------------------------------
+is_valid_apns_env_fun(_Opts) ->
+    fun(V) -> V =:= prod orelse V =:= dev end.
+
+%%--------------------------------------------------------------------
+is_valid_apns_id_fun(Opts) ->
+    fun(V) -> strict(Opts, V, is_uuid_fun(V)) end.
+
+%%--------------------------------------------------------------------
+is_valid_port_fun(_Opts) ->
+    fun(V) -> is_integer_range(V, -1, 16#FFFF) end.
+
+%%--------------------------------------------------------------------
+is_valid_apns_priority_fun(Opts) ->
+    fun(V) ->
+            is_integer(V) andalso
+            strict(Opts, V,
+                   fun(P) -> P == -1 orelse P == 5 orelse P == 10 end)
+    end.
+
+%%--------------------------------------------------------------------
+is_valid_apns_version_fun(_Opts) ->
+    fun(V) -> is_integer_range(V, ?MIN_APNS_VER, ?MAX_APNS_VER) end.
+
+%%--------------------------------------------------------------------
+is_valid_badge_fun(_Opts) ->
+    fun(V) -> is_integer_range(V, -1, ?MAX_APNS_BADGE) end.
+
+%%--------------------------------------------------------------------
+is_valid_apns_sound_fun(_Opts) ->
+    fun io_lib:printable_unicode_list/1.
 
 %%--------------------------------------------------------------------
 %% Predicates
 %%--------------------------------------------------------------------
-apns_auth(Opts) ->
-    Pred = fun([]) -> true;
-               (V) -> is_list(V) andalso filelib:is_regular(V)
-           end,
-    assert_prop(Pred, apns_auth, Opts).
-
-%%--------------------------------------------------------------------
-apns_cert(Opts) ->
-    Pred = fun([]) -> true;
-              (V) -> is_list(V) andalso filelib:is_regular(V)
-           end,
-    assert_prop(Pred, apns_cert, Opts).
-
-%%--------------------------------------------------------------------
-apns_ca_cert(Opts) ->
-    Pred = fun([]) -> true;
-              (V) -> is_list(V) andalso filelib:is_regular(V)
-           end,
-    assert_prop(Pred, apns_ca_cert, Opts).
-
-%%--------------------------------------------------------------------
-apns_expiration(Opts) ->
-    Pred = fun(V) ->
-                   strict(Opts, is_integer_range(V, -1, 16#FFFFFFFF))
-           end,
-    assert_prop(Pred, apns_expiration, Opts).
-
-%%--------------------------------------------------------------------
-apns_env(Opts) ->
-    Pred = fun(V) -> V =:= prod orelse V =:= dev end,
-    assert_prop(Pred, apns_env, Opts).
-
-%%--------------------------------------------------------------------
-apns_host(Opts) ->
-    Pred = fun(V) -> is_string(V) end,
-    assert_prop(Pred, apns_host, Opts).
-
-%%--------------------------------------------------------------------
-apns_id(Opts) ->
-    Pred = fun([]) -> true;
-              (V)  -> strict(Opts, is_uuid(V))
-           end,
-    assert_prop(Pred, apns_id, Opts).
-
-%%--------------------------------------------------------------------
-apns_issuer(Opts) ->
-    Pred = fun([]) -> true;
-              (V) -> is_string(V)
-           end,
-    assert_prop(Pred, apns_issuer, Opts).
-
-%%--------------------------------------------------------------------
-apns_key(Opts) ->
-    Pred = fun([]) -> true;
-              (V) -> is_list(V) andalso filelib:is_regular(V)
-           end,
-    assert_prop(Pred, apns_key, Opts).
-
-%%--------------------------------------------------------------------
-apns_kid(Opts) ->
-    Pred = fun([]) -> true;
-              (V) -> is_string(V)
-           end,
-    assert_prop(Pred, apns_kid, Opts).
-
-%%--------------------------------------------------------------------
-apns_port(Opts) ->
-    Pred = fun(V) -> is_integer_range(V, -1, 16#FFFF) end,
-    assert_prop(Pred, apns_port, Opts).
-
-%%--------------------------------------------------------------------
-apns_priority(Opts) ->
-    Pred = fun(V) when is_integer(V) ->
-                   strict(Opts, V == -1 orelse V == 5 orelse V == 10)
-           end,
-    assert_prop(Pred, apns_priority, Opts).
-
-%%--------------------------------------------------------------------
-apns_token(Opts) ->
-    Pred = fun(V) -> is_nonempty_string(V) end,
-    assert_prop(Pred, apns_token, Opts).
-
-%%--------------------------------------------------------------------
-%% If no_ssl is true, apns_topic is mandatory
-apns_topic(Opts) ->
-    NoSsl = aptest_util:req_prop(no_ssl, Opts),
-    Pred = case NoSsl of
-               {_, false} ->
-                   fun(V) -> is_string(V) end;
-               {_, true} ->
-                   fun(V) -> is_nonempty_string(V) end
-           end,
-    assert_prop(Pred, apns_topic, Opts).
-
-%%--------------------------------------------------------------------
-apns_version(Opts) ->
-    Pred = fun(V) -> is_integer_range(V, ?MIN_APNS_VER, ?MAX_APNS_VER) end,
-    assert_prop(Pred, apns_version, Opts).
-
-%%--------------------------------------------------------------------
-badge(Opts) ->
-    Pred = fun(V) -> is_integer_range(V, -1, ?MAX_APNS_BADGE) end,
-    assert_prop(Pred, badge, Opts).
-
-%%--------------------------------------------------------------------
-%% If either raw_json or no_check_json is provided, message must not be
-%% provided
-message(Opts) ->
-    RawJson = aptest_util:req_prop(raw_json, Opts),
-    NoJson = aptest_util:req_prop(no_json, Opts),
-    MessageMustBeEmpty = case {RawJson, NoJson} of
-                             {{_, [_|_]}, _} -> true;
-                             {_, {_, true}} -> true;
-                             _ -> false
-                         end,
-    Pred = case MessageMustBeEmpty of
-               true ->
-                   fun(V) -> V == [] end;
-               false ->
-                   fun(V) -> is_nonempty_string(V) end
-           end,
-    assert_prop(Pred, message, Opts).
-
-%%--------------------------------------------------------------------
-%% If raw_json is provided, message must not be provided
-raw_json(Opts) ->
-    Pred = case aptest_util:req_prop(message, Opts) of
-               {_, [_|_]} ->
-                   fun(V) -> V == [] end;
-               _ ->
-                   fun([]) ->
-                           true;
-                      (V) ->
-                           case nocheck_json(Opts) of
-                               false ->
-                                   B = sc_util:to_bin(V),
-                                   jsx:is_json(B);
-                               true ->
-                                   true
-                           end
-                   end
-           end,
-    assert_prop(Pred, raw_json, Opts).
-
-%%--------------------------------------------------------------------
-relaxed(Opts) ->
-    sc_util:val(relaxed, Opts, false).
-
-%%--------------------------------------------------------------------
-sound(Opts) ->
-    assert_prop(fun io_lib:printable_unicode_list/1, sound, Opts).
-
-%%--------------------------------------------------------------------
-nocheck_json(Opts) ->
-    sc_util:val(no_check_json, Opts, false).
-
-%%--------------------------------------------------------------------
-no_json(Opts) ->
-    assert_prop(fun(_) -> true end, no_json, Opts).
-
-%%--------------------------------------------------------------------
-no_ssl(Opts) ->
-    assert_prop(fun(_) -> true end, no_ssl, Opts).
-
-%%--------------------------------------------------------------------
-verbose(Opts) ->
-    lists:foldl(fun({verbose, _} = V, _Acc) -> V;
-                   (_, Acc) -> Acc
-                end, aptest_util:req_prop(verbose, Opts), Opts).
-
-%%--------------------------------------------------------------------
-%% Helper functions
-%%--------------------------------------------------------------------
-assert_prop(Pred, Key, Props) when is_function(Pred, 1), is_list(Props) ->
-    Prop = aptest_util:req_prop(Key, Props),
-    Exc = case Prop of
-              {Key, []} -> {missing_required_option, Key};
-              _         -> {invalid_option_arg, Prop}
-          end,
-    aptest_util:map_prop(assert_or_die_fun(Pred, Exc), Prop).
-
-%%--------------------------------------------------------------------
-assert_or_die_fun(Pred, Exc) ->
-    fun(V) ->
-            case Pred(V) of
-                true  -> V;
-                false -> throw(Exc)
-            end
-    end.
-
-%%--------------------------------------------------------------------
-strict(Opts, StrictTest) ->
-    case is_relaxed(Opts) of
-        true ->
-            true;
-        false ->
-            StrictTest
-    end.
-
-%%--------------------------------------------------------------------
-is_relaxed(Opts) ->
-    sc_util:val(relaxed, Opts, false).
-
 %%--------------------------------------------------------------------
 -spec is_string(term()) -> boolean().
 is_string(X) when is_binary(X) ->
@@ -502,6 +412,56 @@ is_pos_integer_range(X, Max) ->
 is_uuid(X) ->
     is_nonempty_string(X) andalso % 8-4-4-4-12
     match == re:run(X, ?UUID_RE, [{capture, none}]).
+
+%%--------------------------------------------------------------------
+strict(Opts, Val, StrictTestFun) when is_function(StrictTestFun, 1) ->
+    is_relaxed(Opts) orelse StrictTestFun(Val).
+
+%%--------------------------------------------------------------------
+is_relaxed(Opts) ->
+    sc_util:val(relaxed, Opts, false).
+
+%%--------------------------------------------------------------------
+-spec is_equal(term(), term()) -> boolean().
+is_equal(X, X) -> true;
+is_equal(_, _) -> false.
+
+%%--------------------------------------------------------------------
+%% Helper functions
+%%--------------------------------------------------------------------
+assert_prop(Pred, Key, Props) when is_function(Pred, 1), is_list(Props) ->
+    Prop = aptest_util:req_prop(Key, Props),
+    ?trace("Pred: ~p, Key: ~p, Prop: ~p", [Pred, Key, Prop]),
+    Exc = case Prop of
+              {Key, []} -> {missing_required_option, Key};
+              _         -> {invalid_option_arg, Prop}
+          end,
+    aptest_util:map_prop(assert_or_die_fun(Pred, Exc), Prop).
+
+%%--------------------------------------------------------------------
+assert_kv(Pred, {Key, _Val}=Prop) when is_function(Pred, 1) ->
+    ?trace("Pred: ~p, Key: ~p, Prop: ~p", [Pred, Key, _Val]),
+    Exc = case Prop of
+              {Key, []} -> {missing_required_option, Key};
+              _         -> {invalid_option_arg, Prop}
+          end,
+    aptest_util:map_prop(assert_or_die_fun(Pred, Exc), Prop).
+
+%%--------------------------------------------------------------------
+check_prop(Pred, Key, Props) when is_function(Pred, 1), is_list(Props) ->
+    {_, Val}=Prop = aptest_util:req_prop(Key, Props),
+    ?trace("Pred: ~p, Key: ~p, Prop: ~p", [Pred, Key, Prop]),
+    Pred(Val).
+
+%%--------------------------------------------------------------------
+assert_or_die_fun(Pred, Exc) when is_function(Pred, 1) ->
+    fun(V) ->
+            ?trace("Pred: ~p, Exc: ~p", [Pred, Exc]),
+            case Pred(V) of
+                true  -> V;
+                false -> erlang:error(Exc)
+            end
+    end.
 
 %%--------------------------------------------------------------------
 -spec wrap_result(OptSpecList, Result) -> WrappedResult when
@@ -547,72 +507,249 @@ atom_to_action(Atom) when is_atom(Atom) ->
     {ok, {Action, []}}.
 
 %%--------------------------------------------------------------------
--spec validate_action_cfg(CfgResult) -> Result when
-      CfgResult :: {ok, {Action, Config}} | {error, Reason},
-      Result :: {ok, {Action, Config}} | {error, Reason},
-      Action :: action(), Config :: config(), Reason :: term().
+%% Rules engine
+%%--------------------------------------------------------------------
+-type cmdline_opt() :: atom().
+-type rules() :: [rule()].
+-type rule() :: {action(), rule_conditions()}.
+-type rule_conditions() :: [rule_condition()].
+-type rule_condition() :: cmdline_opt_assertion()
+                        | {cmdline_opt(), rule_pred(), true_part()}
+                        | {cmdline_opt(), rule_pred(), true_part(), false_part()}.
+-type rule_pred() :: present
+                   | absent
+                   | {value, any()}
+                   | {'FAIL', Msg :: string()}
+                   | func_pred().
+-type func_pred() :: fun((any()) -> boolean()).
+-type true_part() :: cmdline_opt_assertions().
+-type false_part() :: cmdline_opt_assertions().
+-type cmdline_opt_assertions() :: [cmdline_opt_assertion()].
+-type cmdline_opt_assertion() :: {cmdline_opt(), rule_assertion()}.
+-type rule_assertion() :: required
+                        | forbidden
+                        | {value, any()}
+                        | func_pred()
+                        | {'FAIL', Msg :: string()}
+                        | {rule_pred(), true_part()}
+                        | {rule_pred(), true_part(), false_part()}.
 
-%% TODO: Unstub this
-validate_action_cfg(Any) -> Any.
 
-%% if apns_auth is present:
-%%  apns_version MUST be > 2
-%%  apns_issuer MUST be present
-%%  apns_ca_cert MUST be present
-%%  action_showcert is invalid
-%%  apns_cert and apns_key must be removed
-%% else % apns_auth is absent
-%%  apns_cert and apns_key MUST be present
-%%  apns_ca_cert MUST be present
-%%  apns_issuer must be removed
-%%
-%%validate_action_cfg({ok, {action_send, Config}} = Result) ->
-%%    validate_send_config(Config),
-%%    Result;
-%%validate_action_cfg({ok, {action_connect, Config}} = Result) ->
-%%    ok;
-%%validate_action_cfg({ok, {action_showcert, Config}} = Result) ->
-%%    ok;
-%%validate_action_cfg({error, _} = Error) ->
-%%    Error.
-%%
-%%-spec validate_send_config(Config) -> NewConfig when
-%%      Config :: config(), NewConfig :: config().
-%%validate_send_config(Config) ->
-%%    {_, AptestCfg} = aptest_util:req_prop(aptest, Config),
-%%    {_, AuthCfg} = aptest_util:req_prop(auth_opts, Config),
-%%    case apns_auth(AuthCfg) of
-%%        [] ->
-%%            apns_cert(AuthCfg) /= [] andalso
-%%            apns_key(AuthCfg) /= [] andalso
-%%            apns_ca_cert(AuthCfg) /= [] andalso
-%%            begin
-%%                NewAptestCfg = remove_keys(AuthCfg, [apns_issuer]),
-%%                lists:keystore(aptest, 1, Config, {aptest, NewAptestcfg})
-%%            end;
-%%        _AuthFile ->
-%%            apns_version(AptestCfg) > 2 andalso
-%%            apns_issuer(AuthCfg) /= [] andalso
-%%            apns_ca_cert(AptestCfg) /= [] andalso
-%%            begin
-%%                NewAuthCfg = remove_keys(AuthCfg, [apns_cert, apns_keys]),
-%%                lists:keystore(auth_opts, 1, Config, {auth_opts, NewAuthCfg})
-%%            end
-%%    end.
-%%
-%%valid_combinations(action_send) ->
-%%    [
-%%     {apns_auth, fun is_nonempty_string/1},
-%%     {apns_version, fun(V) -> V > 2 end},
-%%     {apns_issuer, fun is_nonempty_string/1},
-%%     {apns_ca_cert, fun is_nonempty_string/1}
-%%    ];
-%%valid_combinations(action_connect) ->
-%%    [
-%%     {apns_auth, fun is_nonempty_string/1},
-%%     {apns_version, fun(V) -> V > 2 end},
-%%     {apns_issuer, fun is_nonempty_string/1},
-%%     {apns_ca_cert, fun is_nonempty_string/1}
-%%    ].
+%%--------------------------------------------------------------------
+walk_rules(Rules, Config) when is_list(Rules) ->
+    ?trace("Rules: ~p", [Rules]),
+    lists:foreach(fun(Rule) ->
+                          ?trace("Rule: ~p", [Rule]),
+                          rule_condition(Rule, Config)
+                  end, Rules).
+
+%%--------------------------------------------------------------------
+rule_condition({Opt, Assertion}, Config) ->
+    cmdline_opt_assertion(Opt, Assertion, Config);
+rule_condition({Opt, Pred, IfTrue}, Config) ->
+    rule_condition(Opt, {Pred, IfTrue, []}, Config);
+rule_condition({Opt, Pred, IfTrue, IfFalse}, Config) ->
+    ?trace("{~p, ~p, ~p, ~p}", [Opt, Pred, IfTrue, IfFalse]),
+    rule_condition(Opt, {Pred, IfTrue, IfFalse}, Config).
+
+%%--------------------------------------------------------------------
+-spec rule_condition(Opt, RuleCondition, Config) -> ok when
+      Opt :: cmdline_opt(), RuleCondition :: {Pred, IfTrue, IfFalse},
+      Pred :: rule_pred(), IfTrue :: true_part(), IfFalse :: false_part(),
+      Config :: list().
+rule_condition(Opt, {Pred, IfTrue, IfFalse}=T, Config) ->
+    ?trace("~p, ~p", [Opt, T]),
+    Assertions = case rule_pred(Pred, Opt, Config) of
+                     true  ->
+                         ?trace("~p rule_pred was ~p", [Opt, true]),
+                         IfTrue;
+                     false ->
+                         ?trace("~p rule_pred was ~p", [Opt, false]),
+                         IfFalse
+                 end,
+    cmdline_opt_assertions(Assertions, Config).
+
+%%--------------------------------------------------------------------
+rule_pred(present, Opt, Config) ->
+    ?trace("present, ~p", [Opt]),
+    check_prop(fun is_present/1, Opt, Config);
+rule_pred(absent, Opt, Config) ->
+    ?trace("absent, ~p", [Opt]),
+    check_prop(fun is_absent/1, Opt, Config);
+rule_pred({value, Value}, Opt, Config) ->
+    ?trace("{value, ~p}, ~p", [Value, Opt]),
+    check_prop(is_equal_fun({Value, []}), Opt, Config);
+rule_pred({'FAIL', Msg}, Opt, _Config) ->
+    ?trace("{'FAIL', ~p}, ~p", [Msg, Opt]),
+    erlang:error({rule_failed, Msg, for_opt, Opt});
+rule_pred(Pred, Opt, Config) when is_function(Pred, 1) ->
+    ?trace("Pred ~p, ~p", [Pred, Opt]),
+    Pred(sc_util:val(Opt, Config));
+rule_pred(Pred, Opt, _Config) ->
+    erlang:error({unknown_rule_predicate, Pred, for_opt, Opt}).
+
+%%--------------------------------------------------------------------
+cmdline_opt_assertions(Assertions, Config) ->
+    lists:foldl(fun({Opt, RuleAssertion}=_Cond, _Acc) ->
+                        ?trace("~p", [_Cond]),
+                        cmdline_opt_assertion(Opt, RuleAssertion, Config);
+                   ({Opt, _Pred, _IfTrue}=Cond, _Acc) ->
+                        ?trace("~p", [Cond]),
+                        cmdline_opt_assertion(Opt, Cond, Config);
+                   ({Opt, _Pred, _IfTrue, _IfFalse}=Cond, _Acc) ->
+                        ?trace("~p", [Cond]),
+                        cmdline_opt_assertion(Opt, Cond, Config)
+                end, true, Assertions).
+
+%%--------------------------------------------------------------------
+cmdline_opt_assertion(Opt, {Opt, Pred, IfTrue}, Config) ->
+    cmdline_opt_assertion(Opt, {Opt, Pred, IfTrue, []}, Config);
+cmdline_opt_assertion(Opt, {Opt, Pred, IfTrue, IfFalse}=_Rule, Config) ->
+    ?trace("assertion for ~p is rule: ~p", [Opt, _Rule]),
+    rule_condition({Opt, Pred, IfTrue, IfFalse}, Config);
+cmdline_opt_assertion(Opt, required, Config) ->
+    ?trace("required, ~p", [Opt]),
+    assert_is_present(Opt, Config);
+cmdline_opt_assertion(Opt, forbidden, Config) ->
+    ?trace("forbidden, ~p", [Opt]),
+    assert_is_absent(Opt, Config);
+cmdline_opt_assertion(Opt, {value, Value}, Config) ->
+    ?trace("~p, ~p", [{value, Value}, Opt]),
+    assert_is_equal(Opt, Value, Config);
+cmdline_opt_assertion(Opt, {'FAIL', Msg}, _Config) ->
+    ?trace("~p, ~p", [{'FAIL', Msg}, Opt]),
+    erlang:error({failed_rule, Msg, for_opt, Opt});
+cmdline_opt_assertion(Opt, Pred, Config) when is_function(Pred, 1) ->
+    ?trace("Pred ~p, ~p", [Pred, Opt]),
+    assert_prop(Pred, Opt, Config);
+cmdline_opt_assertion(Opt, {RulePred, IfTrue}, Config) ->
+    ?trace("RulePred ~p, IfTrue ~p, ~p", [RulePred, IfTrue, Opt]),
+    rule_condition(Opt, {RulePred, IfTrue, []}, Config);
+cmdline_opt_assertion(Opt, {_RulePred, _IfTrue, _IfFalse}=Cond, Config) ->
+    ?trace("RulePred ~p, IfTrue ~p, IfFalse ~p, ~p",
+           [_RulePred, _IfTrue, _IfFalse, Opt]),
+    rule_condition(Opt, Cond, Config);
+cmdline_opt_assertion(Opt, Cond, _Config) ->
+    erlang:error({unknown_opt_assertion, {Opt, Cond}}).
+
+%%--------------------------------------------------------------------
+is_present(V) ->
+    IsPresent = (V =/= undefined andalso V =/= []),
+    ?trace("~p ~s present", [V, either(IsPresent, "is", "is not")]),
+    IsPresent.
+
+%%--------------------------------------------------------------------
+is_absent(V) ->
+    not is_present(V).
+
+%%--------------------------------------------------------------------
+assert_is_present(Opt, Config) ->
+    ?trace("Opt: ~p", [Opt]),
+    assert_prop(fun is_present/1, Opt, Config).
+
+%%--------------------------------------------------------------------
+assert_is_absent(Opt, Config) ->
+    ?trace("Opt: ~p", [Opt]),
+    assert_prop(fun is_absent/1, Opt, Config).
+
+%%--------------------------------------------------------------------
+assert_is_equal(Opt, ExpectedValue, Config) ->
+    ?trace("Opt: ~p, Expected: ~p", [Opt, ExpectedValue]),
+    assert_prop(is_equal_fun({ExpectedValue, []}), Opt, Config).
+
+%%--------------------------------------------------------------------
+-spec rules() -> rules().
+rules() ->
+    [
+     %% Connect rules
+     {action_connect,
+
+      [{no_ssl, {value, false},
+        %% no_ssl is false (i.e. SSL required)
+        [{apns_auth, absent,
+            [{apns_cert, required},
+             {apns_key, required}]}
+        ]
+       }
+      ]
+     },
+
+     %% Send rules
+     {action_send,
+
+      [{message, present,
+        %% message present
+        [{no_check_json, {value, false}},
+         {no_json, {value, false}},
+         {raw_json, forbidden}],
+        %% message absent
+        [{raw_json, present,
+          % raw_json present
+          [{no_json, {value, false}}],
+          % raw_json absent
+          [{'FAIL', "message or raw-json required"}]
+         }
+        ]
+       },
+
+
+       {no_ssl, {value, true},
+        %% SSL is not being used
+        [{apns_auth, required},
+         {apns_issuer, required},
+         {apns_kid, required},
+         {apns_token, required},
+         {apns_topic, required}],
+        %% SSL is being used
+        [{apns_auth, present,
+          %% apns_auth has been provided, but this
+          %% is only supported for v3 upwards
+          [{apns_version, fun(V) -> is_integer_range(V, 3, ?MAX_APNS_VER) end},
+           {apns_issuer, required},
+           {apns_kid, required},
+           {apns_token, required},
+           {apns_topic, required},
+           {apns_cert, forbidden},
+           {apns_key, forbidden}
+          ],
+          %% apns_auth has not been provided
+          [{apns_cert, required},
+           {apns_key, required},
+           {apns_token, required},
+           {apns_issuer, forbidden},
+           {apns_kid, forbidden}
+          ]
+         }
+        ]
+       }
+      ]
+     },
+
+     %% Showcert rules
+     {action_showcert,
+      [{apns_cert, required}]
+     },
+
+     %% Help rules
+     {action_help, []},
+
+     %% Version rules
+     {action_version, []}
+    ].
+
+%%--------------------------------------------------------------------
+either(true,  IfTrue, _IfFalse) -> IfTrue;
+either(false, _IfTrue, IfFalse) -> IfFalse.
+
+%%--------------------------------------------------------------------
+set_debug(K, AptestCfg) when K =:= verbose; K =:= trace ->
+    IsSet = (sc_util:val(K, AptestCfg, false) =:= true),
+    put(K, IsSet),
+    K =:= trace andalso IsSet andalso put(verbose, IsSet).
+
+%%--------------------------------------------------------------------
+set_log_level(AptestCfg) ->
+    lists:foreach(fun(K) -> set_debug(K, AptestCfg) end, [verbose, trace]).
+
 
 % ex: set ft=erlang fenc=utf-8 sts=4 ts=4 sw=4 et:

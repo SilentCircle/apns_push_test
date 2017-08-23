@@ -8,6 +8,7 @@
         err_msg/3,
         hexdump/1,
         map_prop/2,
+        maybe_show_opts/1,
         msg/2,
         msg/3,
         ping_until_timeout/3,
@@ -231,6 +232,15 @@ iso8601_ts() ->
     {{Yr, Mo, Dy}, {H, M, S}} = calendar:now_to_universal_time(Now),
     io_lib:format("~4..0B-~2..0B-~2..0BT~2..0B:~2..0B:~2..0B.~6..0BZ",
                   [Yr, Mo, Dy, H, M, S, Micros]).
+
+%%--------------------------------------------------------------------
+maybe_show_opts(Opts) ->
+    case sc_util:val(verbose, Opts) of
+        true ->
+            aptest_util:msg("Opts: ~p", [Opts]);
+        _ ->
+            ok
+    end.
 
 
 % ex: set ft=erlang fenc=utf-8 sts=4 ts=4 sw=4 et:

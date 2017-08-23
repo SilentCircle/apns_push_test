@@ -9,6 +9,7 @@
 -import(sc_util, [to_bin/1, to_list/1]).
 
 -include_lib("public_key/include/public_key.hrl").
+-include("aptest.hrl").
 
 %%%-------------------------------------------------------------------
 %%% Types
@@ -34,8 +35,10 @@
                       | apns_key
                       | apns_ca_cert
                       | apns_auth
+                      | apns_pkey
+                      | apns_kid
                       | apns_issuer.
--type auth_cfg_item() :: {auth_cfg_key(), string()}.
+-type auth_cfg_item() :: {auth_cfg_key(), term()}.
 -type auth_cfg() :: [auth_cfg_item()].
 
 -type auth_opt() :: ssl:ssl_option() | apns_auth_info().
@@ -48,16 +51,21 @@
 %%%-------------------------------------------------------------------
 
 %%--------------------------------------------------------------------
--spec start_client(Scheme, Host, Port, AuthOpts) -> Result when
+-spec start_client(Scheme, Host, Port, AuthOpts, OtherOpts) -> Result when
       Scheme :: http | https, Host :: string(), Port :: non_neg_integer(),
-      AuthOpts :: [term()], Result :: {ok, pid()} | {error, term()}.
-start_client(Scheme, Host, Port, AuthOpts) when Scheme == https orelse
-                                                Scheme == http ->
+      AuthOpts :: [term()], OtherOpts :: [term()],
+      Result :: {ok, pid()} | {error, term()}.
+start_client(Scheme, Host, Port, AuthOpts, OtherOpts)
+  when Scheme == https orelse Scheme == http ->
+    Verbose = sc_util:val(verbose, OtherOpts, false),
     msg("Connecting with HTTP/2 to ~p://~s:~B~n", [Scheme, Host, Port]),
-    msg("Auth Opts: ~p~n", [AuthOpts]),
+    Verbose andalso msg("Auth Opts: ~p~n", [AuthOpts]),
     Mod = fmt_module(Scheme),
     OldTrap = process_flag(trap_exit, true),
-    try timer:tc(h2_client, start_link, [Scheme, Host, Port, AuthOpts]) of
+    SslOpts = lists:foldl(fun(K, PL) ->
+                                  proplists:delete(K, PL)
+                          end, AuthOpts, [apns_issuer, apns_kid, apns_pkey]),
+    try timer:tc(h2_client, start_link, [Scheme, Host, Port, SslOpts]) of
         {T, {ok, _}=Result} ->
             msg("Connected in ~B microseconds.~n", [T]),
             Result;
@@ -71,7 +79,7 @@ start_client(Scheme, Host, Port, AuthOpts) when Scheme == https orelse
         Class:Reason ->
             err_msg("[~p:~p] Exception, class: ~p, reason: ~p~n",
                     [Class, Reason]),
-            Reason
+            {error, Reason}
     after
         process_flag(trap_exit, OldTrap)
     end.
@@ -90,8 +98,9 @@ stop_client(Pid) ->
     when Opts :: list(), Env :: apns_env(), Result :: connect_result().
 connect(Opts, Env) when Env =:= prod; Env =:= dev ->
     AuthOpts = sc_util:val(auth_opts, Opts, []),
+    OtherOpts = [{verbose, sc_util:val(verbose, Opts, false)}],
     {Scheme, Host, Port} = get_apns_conninfo(Env, Opts),
-    case start_client(Scheme, Host, Port, AuthOpts) of
+    case start_client(Scheme, Host, Port, AuthOpts, OtherOpts) of
         {ok, Pid} ->
             msg("Connected ok, disconnecting.~n", []),
             _ = stop_client(Pid);
@@ -104,15 +113,16 @@ connect(Opts, Env) when Env =:= prod; Env =:= dev ->
       Token :: token(), JSON :: json(), Opts :: list(),
       Env :: apns_env(), Result :: send_result().
 send(Token, JSON, Opts, Env) when Env =:= prod; Env =:= dev ->
-    {Scheme, Host, Port} = get_apns_conninfo(Env, Opts),
     AuthOpts = sc_util:val(auth_opts, Opts, []),
-    case start_client(Scheme, Host, Port, AuthOpts) of
+    OtherOpts = [{verbose, sc_util:val(verbose, Opts, false)}],
+    {Scheme, Host, Port} = get_apns_conninfo(Env, Opts),
+    case start_client(Scheme, Host, Port, AuthOpts, OtherOpts) of
         {ok, Pid} ->
-            try
-                send_impl(Scheme, Pid, Token, JSON, Opts)
-            catch
-                _:Reason ->
-                    Reason
+            try (catch send_impl(Scheme, Pid, Token, JSON, Opts)) of
+                {'EXIT', {Reason, Stacktrace}} ->
+                    {error, {Reason, Stacktrace}};
+                Result ->
+                    Result
             after
                 _ = stop_client(Pid)
             end;
@@ -125,6 +135,10 @@ send(Token, JSON, Opts, Env) when Env =:= prod; Env =:= dev ->
       Scheme :: https | http, Pid :: pid(), Token :: token(), JSON :: json(),
       Opts :: cmdline_opts(), Result :: send_result().
 send_impl(Scheme, Pid, Token, JSON, Opts) ->
+    ?trace("Scheme: ~p, Pid: ~p, Token: ~p, JSON: ~p\n   Opts: ~p",
+           [Scheme, Pid, Token, JSON, Opts]),
+    TokenAuth = maybe_token_auth(Opts),
+    ?trace("TokenAuth: ~p",[TokenAuth]),
     HTTPPath = to_bin([<<"/3/device/">>, Token]),
     ReqHdrs = [{<<":method">>, <<"POST">>},
                {<<":path">>, HTTPPath},
@@ -132,7 +146,8 @@ send_impl(Scheme, Pid, Token, JSON, Opts) ->
               ] ++ maybe_prop(apns_id, Opts)
                 ++ maybe_prop(apns_topic, Opts)
                 ++ maybe_prop(apns_expiration, Opts)
-                ++ maybe_prop(apns_priority, Opts),
+                ++ maybe_prop(apns_priority, Opts)
+                ++ TokenAuth,
 
     ReqBody = JSON,
     sync_req(Pid, ReqHdrs, ReqBody).
@@ -153,6 +168,24 @@ maybe_prop(Name, PL) ->
     end.
 
 %%--------------------------------------------------------------------
+maybe_token_auth(Opts) ->
+    AuthCfg = sc_util:req_val(auth_opts, Opts),
+    TokenOpts = lists:foldr(fun(K, Acc) ->
+                                    case lists:keyfind(K, 1, AuthCfg) of
+                                        false  -> Acc;
+                                        {_, V} -> [V|Acc]
+                                    end
+                            end, [], [apns_kid, apns_issuer, apns_pkey]),
+    case TokenOpts of
+        [Kid, Iss, Key] ->
+            ?trace("Kid: ~p, Iss: ~p, Key: ~p", [Kid, Iss, Key]),
+            JWT = apns_jwt:jwt(sc_util:to_bin(Kid), sc_util:to_bin(Iss), Key),
+            [{<<"authorization">>, << <<"bearer ">>/binary, JWT/binary>>}];
+        _ ->
+            []
+    end.
+
+%%--------------------------------------------------------------------
 %% this_is_a_key -> <<"this-is-a-key">>
 atom_to_dash_binary(X) when is_atom(X) ->
     S = atom_to_list(X),
@@ -160,18 +193,21 @@ atom_to_dash_binary(X) when is_atom(X) ->
 
 %%--------------------------------------------------------------------
 sync_req(Pid, ReqHdrs, ReqBody) ->
-    msg("Sending synchronous request:~nHeaders: ~p~nBody: ~p~n",
-        [ReqHdrs, ReqBody]),
+    msg("Sending synchronous request:~nHeaders: ~s~nBody: ~s~n",
+        [jsx:encode(ReqHdrs), ReqBody]),
 
     {TElapsed, Result} = timer:tc(h2_client, sync_request,
                                   [Pid, ReqHdrs, ReqBody]),
     {ok, {RespHdrs, RespBody}} = Result,
-
+    RespBStr = case RespBody of
+                   [BStr] -> BStr;
+                   []     -> []
+               end,
     msg("~n"
         "Response time: ~B microseconds~n"
-        "Response headers: ~p~n"
-        "Response body: ~p~n",
-        [TElapsed, RespHdrs, RespBody]),
+        "Response headers: ~s~n"
+        "Response body: ~s~n",
+        [TElapsed, jsx:encode(RespHdrs), RespBStr]),
 
     case sc_util:req_val(<<":status">>, RespHdrs) of
         <<"200">> ->
@@ -186,7 +222,7 @@ format_apns_error({RespHdrs, RespBody}) ->
     S = sc_util:req_val(<<":status">>, RespHdrs),
     SD = apns_lib_http2:status_desc(S),
     {Fmt, Args} = parsed_resp_body_fmt(Id, S, SD, parse_resp_body(RespBody)),
-    io_lib:format(Fmt, Args).
+    lists:flatten(io_lib:format(Fmt, Args)).
 
 %%--------------------------------------------------------------------
 parsed_resp_body_fmt(Id, S, SD, []) ->
@@ -200,8 +236,9 @@ parsed_resp_body_fmt(Id, S, SD, [{Rsn, EJSON}]) ->
      "status_desc:    ~s~n"
      "reason:         ~s~n"
      "reason_desc:    ~s~n"
-     "ejson:          ~p~n",
-     [Id, S, SD, Rsn, apns_lib_http2:reason_desc(Rsn), EJSON]};
+     "json:           ~s~n",
+     [Id, S, SD, Rsn, apns_lib_http2:reason_desc(Rsn),
+      jsx:encode(EJSON)]};
 parsed_resp_body_fmt(Id, S, SD, [{Rsn, TS, EJSON}]) ->
     {"id:             ~s~n"
      "status:         ~s~n"
@@ -210,9 +247,9 @@ parsed_resp_body_fmt(Id, S, SD, [{Rsn, TS, EJSON}]) ->
      "reason_desc:    ~s~n"
      "timestamp:      ~B~n"
      "timestamp_desc: ~s~n"
-     "ejson:          ~p~n",
+     "json:           ~s~n",
      [Id, S, SD, Rsn, apns_lib_http2:reason_desc(Rsn), TS, timestamp_desc(TS),
-      EJSON]}.
+      jsx:encode(EJSON)]}.
 
 %%%-------------------------------------------------------------------
 %%% Internal Functions
@@ -273,13 +310,25 @@ timestamp_desc(TS) when is_integer(TS), TS >= 0 ->
 -spec make_auth_opts(AuthCfg) -> AuthOpts when
       AuthCfg :: auth_cfg(), AuthOpts :: auth_opts().
 make_auth_opts(AuthCfg) ->
+    case sc_util:val(apns_auth, AuthCfg, []) of
+        [] ->
+            make_cert_auth_opts(AuthCfg);
+        Filename ->
+            {ok, KeyPEM} = file:read_file(Filename),
+            make_token_auth_opts(AuthCfg, KeyPEM)
+    end.
+
+%%--------------------------------------------------------------------
+-spec make_cert_auth_opts(AuthCfg) -> AuthOpts when
+      AuthCfg :: auth_cfg(), AuthOpts :: auth_opts().
+make_cert_auth_opts(AuthCfg) ->
     APNSCert = sc_util:req_val(apns_cert, AuthCfg),
     APNSKey = sc_util:req_val(apns_key, AuthCfg),
     APNSCACert = case sc_util:val(apns_ca_cert, AuthCfg, []) of
                      [] ->
                          "/etc/ssl/certs/ca-certificates.crt";
                      CAFile ->
-                        CAFile
+                         CAFile
                  end,
     [{certfile, APNSCert},
      {keyfile, APNSKey},
@@ -287,7 +336,34 @@ make_auth_opts(AuthCfg) ->
      {verify, verify_peer},
      {honor_cipher_order, false},
      {versions, ['tlsv1.2']},
-     {alpn_advertised_protocols, [<<"h2">>]}].
+     {alpn_advertised_protocols, [<<"h2">>]}
+    ].
+
+-spec make_token_auth_opts(AuthCfg, KeyPEM) -> AuthOpts when
+      AuthCfg :: auth_cfg(), KeyPEM :: binary(),
+      AuthOpts :: auth_opts().
+make_token_auth_opts(AuthCfg, KeyPEM) ->
+    Iss = sc_util:req_val(apns_issuer, AuthCfg),
+    Kid = sc_util:req_val(apns_kid, AuthCfg),
+    Key = apns_jwt:get_private_key(KeyPEM),
+    APNSCACert = case sc_util:val(apns_ca_cert, AuthCfg, []) of
+                     [] ->
+                         "/etc/ssl/certs/ca-certificates.crt";
+                     CAFile ->
+                         CAFile
+                 end,
+    [
+     %% JWT info
+     {apns_issuer, Iss},
+     {apns_kid, Kid},
+     {apns_pkey, Key},
+     %% Minimal SSL options (no cert auth)
+     {cacertfile, APNSCACert}, % In case of fake CA
+     {honor_cipher_order, false},
+     {versions, ['tlsv1.2']},
+     {alpn_advertised_protocols, [<<"h2">>]}
+    ].
+
 
 %%--------------------------------------------------------------------
 posix_ms_to_iso8601(TS) ->

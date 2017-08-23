@@ -84,26 +84,31 @@ send(Token, JSON, Opts, Env) when Env =:= prod; Env =:= dev ->
 %%--------------------------------------------------------------------
 send_impl(Mod, Sock, Id, Exp, BToken, JSON, Prio) when Mod == ssl orelse
                                                        Mod == gen_tcp ->
-    try
-        Packet = apns_lib:encode_v2(Id, Exp, BToken, JSON, Prio),
-        check_packet(Packet),
-        msg("Sending APNS v2 packet:~n", []),
-        aptest_util:hexdump(Packet),
-        case Mod:send(Sock, Packet) of
-            ok ->
-                msg("Waiting for error response.~n", []),
-                wait_for_resp(mod_to_proto(Mod), 1000);
-            Error ->
-                msg("APNS didn't like that packet! ~p said: ~p~n",
-                    [Mod, Error]),
-                Error
-        end
+    try send_impl_nocatch(Mod, Sock, Id, Exp, BToken, JSON, Prio) of
+        Result ->
+            Result
     catch
         What:Why ->
             msg("send_impl exception: {~p, ~p}~n", [What, Why]),
             {What, Why}
     after
         _ = stop_client(Mod, Sock)
+    end.
+
+%%--------------------------------------------------------------------
+send_impl_nocatch(Mod, Sock, Id, Exp, BToken, JSON, Prio) ->
+    Packet = apns_lib:encode_v2(Id, Exp, BToken, JSON, Prio),
+    check_packet(Packet),
+    msg("Sending APNS v2 packet:~n", []),
+    aptest_util:hexdump(Packet),
+    case Mod:send(Sock, Packet) of
+        ok ->
+            msg("Waiting for error response.~n", []),
+            wait_for_resp(mod_to_proto(Mod), 1000);
+        Error ->
+            msg("APNS didn't like that packet! ~p said: ~p~n",
+                [Mod, Error]),
+            Error
     end.
 
 %%--------------------------------------------------------------------
@@ -155,13 +160,13 @@ wait_for_resp(Proto, _Closed, Timeout, Status) when Proto == tcp orelse
         {Proto, _Socket, Data} ->
             msg("Received ~p data: ~p~n", [Proto, Data]),
             NewStatus = handle_response(Data),
-            wait_for_resp(Timeout, NewStatus);
+            wait_for_resp(Proto, _Closed, Timeout, NewStatus);
         {ssl_closed, _Socket} ->
             msg("SSL socket closed~n", []),
-            wait_for_resp(Timeout, Status);
+            wait_for_resp(Proto, _Closed, Timeout, Status);
         Other ->
             msg("Ignored message queue data: ~p~n", [Other]),
-            wait_for_resp(Timeout, Status)
+            wait_for_resp(Proto, _Closed, Timeout, Status)
     after
         Timeout ->
             Status

@@ -29,6 +29,8 @@ exec(PgmName, Args) ->
 %%--------------------------------------------------------------------
 -spec do_main(Args) -> Result when
       Args :: [string()], Result :: terminate_arg().
+do_main([]) ->
+    help;
 do_main(Args) ->
     try aptest_cmdline:parse_args(Args) of
         {ok, {action_help, _Config}} ->
@@ -118,7 +120,6 @@ connect(Config0) ->
 %%--------------------------------------------------------------------
 send(Config) ->
     {_, AptestCfg} = aptest_util:req_prop(aptest, Config),
-    {ok, _Apps} = application:ensure_all_started(ssl),
 
     JSON = case sc_util:req_val(no_json, AptestCfg) of
                true ->
@@ -136,7 +137,7 @@ send(Config) ->
         ok ->
             msg("Pushed without receiving APNS error!~n", []),
             0;
-        {error, {[{_,_}|_] = _Hdrs, <<_Body/binary>>}=AE} ->
+        {error, {[{_,_}|_] = _Hdrs, [<<_Body/binary>>]}=AE} ->
             err_msg("APNS error:~n~s~n",
                     [CallbackMod:format_apns_error(AE)]),
             1;
@@ -242,30 +243,27 @@ module_for_version(Vsn) when is_integer(Vsn), Vsn > 0 ->
 -spec combine_configs(Config) -> Result when
       Config :: list(), Result :: list().
 combine_configs(Config) ->
+    aptest_util:maybe_show_opts(Config),
     {_, AptestCfg} = aptest_util:req_prop(aptest, Config),
     APNSVersion = sc_util:req_val(apns_version, AptestCfg),
     Mod = module_for_version(APNSVersion),
-    case sc_util:val(no_ssl, AptestCfg, false) of
-        true ->
-            [{mod, Mod}, {auth_opts, []} | AptestCfg];
-        false ->
-            {ok, _Apps} = application:ensure_all_started(ssl),
-            {_, AuthCfg} = aptest_util:req_prop(auth_opts, Config),
+    StartSSL = not sc_util:val(no_ssl, AptestCfg, false),
+    StartSSL andalso application:ensure_all_started(ssl),
+    {_, AuthCfg} = aptest_util:req_prop(auth_opts, Config),
 
-            case sc_util:val(apns_auth, AuthCfg) of
-                [] ->
-                    AuthOpts = Mod:make_auth_opts(AuthCfg),
-                    [{mod, Mod}, {auth_opts, AuthOpts} | AptestCfg];
-                Auth ->
-                    case APNSVersion > 2 of
-                        true ->
-                            AuthOpts = Mod:make_auth_opts(AuthCfg),
-                            [{mod, Mod}, {auth_opts, AuthOpts} | AptestCfg];
-                        false ->
-                            throw({incompatible_opts,
-                                   {apns_auth, Auth, apns_version, APNSVersion}})
-                    end
-            end
-    end.
+    AuthOpts = case sc_util:val(apns_auth, AuthCfg, []) of
+                   [] ->
+                       Mod:make_auth_opts(AuthCfg);
+                   Auth ->
+                       case APNSVersion > 2 of
+                           true ->
+                               Mod:make_auth_opts(AuthCfg);
+                           false ->
+                               throw({incompatible_opts,
+                                      {apns_auth, Auth,
+                                       apns_version, APNSVersion}})
+                       end
+               end,
+    [{mod, Mod}, {auth_opts, AuthOpts} | AptestCfg].
 
 % ex: set ft=erlang fenc=utf-8 sts=4 ts=4 sw=4 et:
